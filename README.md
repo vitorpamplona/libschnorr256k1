@@ -240,3 +240,41 @@ implementation written in C11 with these design choices:
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Benchmark Results: libschnorr256k1 vs libsecp256k1 (Bitcoin Core)
+
+Measured on x86_64 Linux. Both libraries compiled with `-O3` and LTO.
+Signatures cross-verified between libraries before timing.
+
+### Individual Operations
+
+| Operation | libsecp256k1 (µs) | libschnorr256k1 (µs) | Speedup |
+|-----------|-------------------:|----------------------:|--------:|
+| pubkeyCreate | 20.3 | 16.2 | 1.25x |
+| signSchnorr (full) | 40.4 | 32.0 | 1.26x |
+| signSchnorr (cached pubkey) | 21.4 | 16.4 | 1.30x |
+| verifySchnorr (BIP-340) | 39.1 | 39.2 | 1.00x |
+| verifySchnorrFast (Nostr) | — | 34.2 | — |
+| ECDH (x-only) | 40.6 | 33.2 | 1.22x |
+
+### Batch Verification (same pubkey)
+
+libsecp256k1 has no same-pubkey batch API, so its column shows N individual
+`schnorrsig_verify` calls. libschnorr256k1 uses randomized linear combination.
+
+| Batch size | libsecp256k1 (µs/sig) | libschnorr256k1 (µs/sig) | Speedup |
+|-----------:|----------------------:|--------------------------:|--------:|
+| 4 | 37.5 | 13.4 | 2.80x |
+| 8 | 37.5 | 9.6 | 3.89x |
+| 16 | 39.0 | 7.6 | 5.15x |
+| 32 | 37.9 | 6.7 | 5.65x |
+| 64 | 39.2 | 6.0 | 6.53x |
+| 200 | 39.1 | 5.7 | 6.88x |
+
+### Nostr-Specific Advantages
+
+| Advantage | libsecp256k1 (µs) | libschnorr256k1 (µs) | Speedup |
+|-----------|-------------------:|----------------------:|--------:|
+| Fast verify (skip y-parity) | 39.1 | 34.2 | 1.14x |
+| Cached pubkey sign | 40.6 | 16.5 | 2.46x |
+| Warm liftX (repeated pubkey) | 39.1 | 39.0 | 1.00x |
