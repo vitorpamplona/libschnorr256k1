@@ -22,6 +22,62 @@ static double now_ms(void) {
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1.0e6;
 }
 
+/* ==================== Number Formatting ==================== */
+
+static const char *fmt_int(int value) {
+    static char bufs[4][32];
+    static int idx = 0;
+    char *buf = bufs[idx++ & 3];
+    char tmp[32];
+    int len = snprintf(tmp, sizeof(tmp), "%d", value);
+    int commas = (len - (value < 0 ? 2 : 1)) / 3;
+    int total = len + commas;
+    buf[total] = '\0';
+    int src = len - 1, dst = total - 1, digits = 0;
+    while (src >= 0) {
+        if (digits && digits % 3 == 0 && tmp[src] != '-')
+            buf[dst--] = ',';
+        buf[dst--] = tmp[src--];
+        digits++;
+    }
+    return buf;
+}
+
+static const char *fmt_double(double value, int decimals) {
+    static char bufs[4][64];
+    static int idx = 0;
+    char *buf = bufs[idx++ & 3];
+    char tmp[64];
+    snprintf(tmp, sizeof(tmp), "%.*f", decimals, value);
+    char *dot = strchr(tmp, '.');
+    int int_len = dot ? (int)(dot - tmp) : (int)strlen(tmp);
+    int neg = (tmp[0] == '-') ? 1 : 0;
+    int digit_count = int_len - neg;
+    int commas = (digit_count - 1) / 3;
+    int dst = 0, digits = 0;
+    for (int i = int_len - 1; i >= neg; i--)
+        digits++;
+    dst = neg + digit_count + commas;
+    if (dot) {
+        int frac_len = (int)strlen(dot);
+        memcpy(buf + dst, dot, (size_t)frac_len);
+        buf[dst + frac_len] = '\0';
+    } else {
+        buf[dst] = '\0';
+    }
+    if (neg) buf[0] = '-';
+    int src = int_len - 1;
+    dst = neg + digit_count + commas - 1;
+    digits = 0;
+    while (src >= neg) {
+        if (digits && digits % 3 == 0)
+            buf[dst--] = ',';
+        buf[dst--] = tmp[src--];
+        digits++;
+    }
+    return buf;
+}
+
 /* ==================== Test Data (matches Kotlin benchmarks) ==================== */
 
 static const uint8_t TEST_PRIVKEY[32] = {
@@ -256,12 +312,13 @@ int main(void) {
     bench_ecdh(N);
 
     /* Print results */
-    printf("\n%-40s %10s %10s %12s\n", "Operation", "Iters", "Time(ms)", "Ops/sec");
-    printf("%-40s %10s %10s %12s\n", "─────────", "─────", "───────", "───────");
+    printf("\n%-40s %12s %12s %14s\n", "Operation", "Iters", "Time(ms)", "Ops/sec");
+    printf("%-40s %12s %12s %14s\n", "─────────", "─────", "───────", "───────");
     for (int i = 0; i < result_count; i++) {
         bench_result *r = &results[i];
-        printf("%-40s %10d %10.1f %12.0f\n",
-               r->name, r->iterations, r->total_ms, r->ops_per_sec);
+        printf("%-40s %12s %12s %14s\n",
+               r->name, fmt_int(r->iterations),
+               fmt_double(r->total_ms, 1), fmt_double(r->ops_per_sec, 0));
     }
 
     printf("\n================================================================\n");
@@ -270,7 +327,7 @@ int main(void) {
     for (int i = 0; i < result_count; i++) {
         bench_result *r = &results[i];
         double us_per_op = (r->total_ms * 1000.0) / r->iterations;
-        printf("  %-38s %8.1f µs\n", r->name, us_per_op);
+        printf("  %-38s %10s µs\n", r->name, fmt_double(us_per_op, 1));
     }
 
     return 0;
