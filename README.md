@@ -81,6 +81,7 @@ CMake options:
 |--------|---------|-------------|
 | `BUILD_TESTS` | `ON` | Build the test suite |
 | `BUILD_BENCH` | `ON` | Build the benchmark |
+| `BUILD_BENCH_COMPARE` | `OFF` | Build comparison benchmark vs libsecp256k1 (requires `LIBSECP256K1_LIB`) |
 
 Platform optimizations are detected automatically:
 
@@ -157,6 +158,49 @@ verifyBatch(4)                             46.7 per batch
 verifyBatch(16)                            82.4 per batch
 ecdhXOnly                                  26.3
 ```
+
+## Comparison Benchmark (vs libsecp256k1)
+
+A head-to-head benchmark compares libschnorr256k1 against Bitcoin Core's
+[libsecp256k1](https://github.com/bitcoin-core/secp256k1). Build libsecp256k1
+first, then point CMake at the compiled library:
+
+```bash
+# Build libsecp256k1 (if you haven't already)
+git clone https://github.com/bitcoin-core/secp256k1.git
+cd secp256k1
+mkdir build && cd build
+cmake .. -DSECP256K1_ENABLE_MODULE_SCHNORRSIG=ON \
+         -DSECP256K1_ENABLE_MODULE_EXTRAKEYS=ON \
+         -DBUILD_SHARED_LIBS=ON
+make
+cd ../..
+
+# Build the comparison benchmark
+cd libschnorr256k1/build
+cmake .. -DBUILD_BENCH_COMPARE=ON \
+         -DLIBSECP256K1_LIB=/path/to/secp256k1/build/lib/libsecp256k1.so
+make schnorr256k1_bench_compare
+
+# Run it
+./schnorr256k1_bench_compare
+```
+
+The benchmark cross-verifies signatures between the two libraries before
+timing, ensuring both are doing the same cryptographic work.
+
+**What the results show:**
+
+| Category | Expected result |
+|----------|----------------|
+| Individual operations (sign, verify, ECDH) | Comparable — within ~5-15% either way |
+| Batch verify (same pubkey) | libschnorr256k1 significantly faster — the per-signature cost drops with batch size |
+| Fast verify (Nostr mode) | libschnorr256k1 faster — skips y-parity inversion |
+| Cached pubkey sign | libschnorr256k1 faster — avoids re-deriving the public key |
+
+The batch verification advantage is the killer feature for Nostr relays
+processing feeds from the same author: at batch size 200, the per-signature
+cost can be 10-13x lower than individual verification.
 
 ## Project Structure
 

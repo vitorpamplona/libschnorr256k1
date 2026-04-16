@@ -7,6 +7,7 @@ set(CMAKE_C_STANDARD 11)
 
 option(BUILD_TESTS "Build tests" ON)
 option(BUILD_BENCH "Build benchmarks" ON)
+option(BUILD_BENCH_COMPARE "Build comparison benchmark against libsecp256k1" OFF)
 
 # ==================== Link-Time Optimization ====================
 #
@@ -66,6 +67,25 @@ endif()
 
 if(BUILD_BENCH)
     add_subdirectory(bench)
+endif()
+
+# ==================== Comparison benchmark ====================
+
+if(BUILD_BENCH_COMPARE)
+    if(NOT LIBSECP256K1_LIB)
+        message(FATAL_ERROR
+            "BUILD_BENCH_COMPARE requires -DLIBSECP256K1_LIB=/path/to/libsecp256k1.so")
+    endif()
+
+    add_executable(schnorr256k1_bench_compare bench/bench_vs_libsecp256k1.c)
+    target_link_libraries(schnorr256k1_bench_compare PRIVATE schnorr256k1)
+    target_include_directories(schnorr256k1_bench_compare PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(schnorr256k1_bench_compare PRIVATE ${LIBSECP256K1_LIB})
+    if(UNIX)
+        target_link_libraries(schnorr256k1_bench_compare PRIVATE m)
+    endif()
 endif()
 
 # ==================== Install rules ====================
