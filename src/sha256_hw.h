@@ -214,20 +214,19 @@ static inline void sha256_transform_hw(uint32_t state[8], const uint8_t block[64
     #undef ARM_SHA_ROUND
 
     /* Rounds 52-55 */
-    TMP0 = vaddq_u32(MSG3, vld1q_u32(&K[52]));
+    TMP0 = vaddq_u32(MSG1, vld1q_u32(&K[52]));
     TMP2 = STATE0;
     STATE0 = vsha256hq_u32(STATE0, STATE1, TMP0);
     STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP0);
-    MSG0 = vsha256su1q_u32(MSG0, MSG2, MSG3);
 
     /* Rounds 56-59 */
-    TMP0 = vaddq_u32(MSG0, vld1q_u32(&K[56]));
+    TMP0 = vaddq_u32(MSG2, vld1q_u32(&K[56]));
     TMP2 = STATE0;
     STATE0 = vsha256hq_u32(STATE0, STATE1, TMP0);
     STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP0);
 
     /* Rounds 60-63 */
-    TMP0 = vaddq_u32(MSG1, vld1q_u32(&K[60]));
+    TMP0 = vaddq_u32(MSG3, vld1q_u32(&K[60]));
     TMP2 = STATE0;
     STATE0 = vsha256hq_u32(STATE0, STATE1, TMP0);
     STATE1 = vsha256h2q_u32(STATE1, TMP2, TMP0);
