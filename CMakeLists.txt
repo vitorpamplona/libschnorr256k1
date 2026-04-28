@@ -26,10 +26,19 @@ endif()
 
 # ==================== Platform-specific optimizations ====================
 
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+# When cross-compiling on Apple platforms via CMAKE_OSX_ARCHITECTURES (e.g. building
+# x86_64 from an Apple Silicon host), CMAKE_SYSTEM_PROCESSOR still reflects the host
+# arch — so prefer the explicit target arch from CMAKE_OSX_ARCHITECTURES if set.
+if(CMAKE_OSX_ARCHITECTURES)
+    list(GET CMAKE_OSX_ARCHITECTURES 0 SCHNORR256K1_TARGET_ARCH)
+else()
+    set(SCHNORR256K1_TARGET_ARCH "${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+
+if(SCHNORR256K1_TARGET_ARCH MATCHES "aarch64|arm64|ARM64")
     message(STATUS "ARM64 detected - enabling NEON and crypto extensions")
     set(PLATFORM_FLAGS "-march=armv8-a+crypto -O3 -fomit-frame-pointer")
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+elseif(SCHNORR256K1_TARGET_ARCH MATCHES "x86_64|AMD64|amd64")
     message(STATUS "x86_64 detected - enabling BMI2 and ADX")
     set(PLATFORM_FLAGS "-march=x86-64-v2 -mbmi2 -msha -msse4.1 -O3 -fomit-frame-pointer")
 else()
