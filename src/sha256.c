@@ -1,10 +1,23 @@
 /*
  * Copyright (c) 2025 Vitor Pamplona
  * Minimal SHA-256 for BIP-340. No external dependencies.
+ *
+ * The compressor is selected at runtime: SHA-NI on x86_64 CPUs that advertise
+ * it, ARM64 Crypto Extensions on aarch64 hosts that advertise SHA2 in HWCAP,
+ * software fallback otherwise. The HW transforms live in their own TUs
+ * compiled with the architecture-specific flags they need, so this file
+ * stays portable and can be compiled at -march=x86-64-v2 (no SHA-NI).
  */
 #include "sha256.h"
 #include "sha256_hw.h"
 #include <string.h>
+
+#if defined(__aarch64__) && defined(__linux__)
+#include <sys/auxv.h>
+#ifndef HWCAP_SHA2
+#define HWCAP_SHA2 (1 << 6)
+#endif
+#endif
 
 static const uint32_t K[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
@@ -45,13 +58,6 @@ static inline void be32_put(uint8_t *p, uint32_t v) {
     p[3] = (uint8_t)v;
 }
 
-#if SHA256_HW_AVAILABLE
-/* Use hardware-accelerated transform (SHA-NI on x86_64, CE on ARM64) */
-static void sha256_transform(uint32_t state[8], const uint8_t block[64]) {
-    sha256_transform_hw(state, block);
-}
-#else
-/* Software fallback */
 static void sha256_transform_sw(uint32_t state[8], const uint8_t block[64]) {
     uint32_t W[64];
     uint32_t a, b, c, d, e, f, g, h;
@@ -75,10 +81,53 @@ static void sha256_transform_sw(uint32_t state[8], const uint8_t block[64]) {
     state[0] += a; state[1] += b; state[2] += c; state[3] += d;
     state[4] += e; state[5] += f; state[6] += g; state[7] += h;
 }
-static void sha256_transform(uint32_t state[8], const uint8_t block[64]) {
-    sha256_transform_sw(state, block);
+
+/* Runtime dispatch.
+ *
+ * Resolved once in a constructor so the per-block call is a single indirect
+ * branch — predicted perfectly after the first invocation. Measured overhead
+ * vs a directly-inlined hardware path is below the benchmark noise floor on
+ * Zen 3 / Apple M1.
+ */
+typedef void (*sha256_transform_fn)(uint32_t state[8], const uint8_t block[64]);
+static sha256_transform_fn sha256_transform_dispatch = sha256_transform_sw;
+
+static int detect_sha_hw(void) {
+#if SHA256_HW_X86_AVAILABLE
+    __builtin_cpu_init();
+    /* SHA-NI alone isn't enough — the transform also uses SSSE3/SSE4.1
+     * shuffles. Modern CPUs that ship SHA-NI always ship SSE4.1, but be
+     * explicit so a future micro-architecture without SSE4.1 can't trip us. */
+    if (__builtin_cpu_supports("sha")
+            && __builtin_cpu_supports("ssse3")
+            && __builtin_cpu_supports("sse4.1")) {
+        sha256_transform_dispatch = sha256_transform_shani;
+        return 1;
+    }
+#endif
+#if SHA256_HW_ARM_AVAILABLE
+#if defined(__linux__)
+    if (getauxval(AT_HWCAP) & HWCAP_SHA2) {
+        sha256_transform_dispatch = sha256_transform_armce;
+        return 1;
+    }
+#elif defined(__APPLE__)
+    /* Every arm64 Apple device ships with SHA2 (Apple A7+, M1+). */
+    sha256_transform_dispatch = sha256_transform_armce;
+    return 1;
+#endif
+#endif
+    return 0;
 }
-#endif /* SHA256_HW_AVAILABLE */
+
+__attribute__((constructor))
+static void sha256_init_dispatch(void) {
+    (void)detect_sha_hw();
+}
+
+static inline void sha256_transform(uint32_t state[8], const uint8_t block[64]) {
+    sha256_transform_dispatch(state, block);
+}
 
 void secp256k1_sha256_init(secp256k1_sha256 *ctx) {
     ctx->state[0] = 0x6a09e667; ctx->state[1] = 0xbb67ae85;
