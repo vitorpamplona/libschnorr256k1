@@ -36,15 +36,28 @@ else()
     set(SCHNORR256K1_TARGET_ARCH "${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
+#
+# The hardware SHA-256 backends (x86 SHA-NI, ARM64 Crypto Extensions) are
+# isolated in their own translation units (src/sha256_hw_x86.c,
+# src/sha256_hw_arm.c) and compiled with their architecture flags applied
+# only to those files. Keeping -msha / +crypto out of the base PLATFORM_FLAGS
+# means the rest of the library (and its dispatcher in sha256.c) runs on any
+# x86-64-v2 / ARMv8-A CPU even when SHA-NI / Crypto Extensions are absent.
 if(SCHNORR256K1_TARGET_ARCH MATCHES "aarch64|arm64|ARM64")
-    message(STATUS "ARM64 detected - enabling NEON and crypto extensions")
-    set(PLATFORM_FLAGS "-march=armv8-a+crypto -O3 -fomit-frame-pointer")
+    message(STATUS "ARM64 detected - NEON baseline; SHA2 dispatched at runtime")
+    set(PLATFORM_FLAGS "-march=armv8-a -O3 -fomit-frame-pointer")
+    set(SHA256_HW_X86 OFF)
+    set(SHA256_HW_ARM ON)
 elseif(SCHNORR256K1_TARGET_ARCH MATCHES "x86_64|AMD64|amd64")
-    message(STATUS "x86_64 detected - enabling BMI2 and ADX")
-    set(PLATFORM_FLAGS "-march=x86-64-v2 -mbmi2 -msha -msse4.1 -O3 -fomit-frame-pointer")
+    message(STATUS "x86_64 detected - SSE4.1/BMI2 baseline; SHA-NI dispatched at runtime")
+    set(PLATFORM_FLAGS "-march=x86-64-v2 -mbmi2 -msse4.1 -O3 -fomit-frame-pointer")
+    set(SHA256_HW_X86 ON)
+    set(SHA256_HW_ARM OFF)
 else()
     message(STATUS "Generic platform - using portable implementation")
     set(PLATFORM_FLAGS "-O3 -fomit-frame-pointer")
+    set(SHA256_HW_X86 OFF)
+    set(SHA256_HW_ARM OFF)
 endif()
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${PLATFORM_FLAGS}")
@@ -60,12 +73,32 @@ set(SECP256K1_SOURCES
     src/sha256.c
 )
 
+if(SHA256_HW_X86)
+    list(APPEND SECP256K1_SOURCES src/sha256_hw_x86.c)
+endif()
+if(SHA256_HW_ARM)
+    list(APPEND SECP256K1_SOURCES src/sha256_hw_arm.c)
+endif()
+
 add_library(schnorr256k1 STATIC ${SECP256K1_SOURCES})
 target_include_directories(schnorr256k1
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+
+# Per-TU flags for the hardware-accelerated backends. SHA-NI / Crypto
+# Extensions intrinsics may only emit their special opcodes from these files;
+# nothing else in the library is built with these flags, so the baseline ABI
+# stays compatible with the broader -march target.
+if(SHA256_HW_X86)
+    set_source_files_properties(src/sha256_hw_x86.c PROPERTIES
+        COMPILE_OPTIONS "-msha;-mssse3;-msse4.1")
+endif()
+if(SHA256_HW_ARM)
+    set_source_files_properties(src/sha256_hw_arm.c PROPERTIES
+        COMPILE_OPTIONS "-march=armv8-a+crypto")
+endif()
 
 # ==================== Optional components ====================
 

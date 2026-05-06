@@ -42,28 +42,40 @@ echo "Sources: $SRC_DIR"
 echo "Output: $OUTPUT_DIR"
 echo ""
 
-SOURCES="field.c scalar.c point.c schnorr.c sha256.c"
+BASE_SOURCES="field.c scalar.c point.c schnorr.c sha256.c"
+INCLUDES="-I$SRC_DIR -I$PROJECT_ROOT/include"
 
 # Build ARM64 static library
 echo "Building arm64-v8a..."
 mkdir -p "$OUTPUT_DIR/arm64-v8a"
-$CC_ARM64 -O3 -march=armv8-a+crypto -fomit-frame-pointer -fPIC -c \
-    -I"$SRC_DIR" -I"$PROJECT_ROOT/include" \
-    $(cd "$SRC_DIR" && for f in $SOURCES; do echo "$SRC_DIR/$f"; done) \
-cd "$OUTPUT_DIR/arm64-v8a"
-ar rcs "$OUTPUT_DIR/arm64-v8a/libschnorr256k1.a" *.o 2>/dev/null || \
-    (cd "$OUTPUT_DIR/arm64-v8a" && ar rcs libschnorr256k1.a field.o scalar.o point.o schnorr.o sha256.o)
+(
+    cd "$OUTPUT_DIR/arm64-v8a"
+    # Baseline ARMv8-A — runs on every aarch64 Android device.
+    for f in $BASE_SOURCES; do
+        $CC_ARM64 -O3 -march=armv8-a -fomit-frame-pointer -fPIC -c $INCLUDES "$SRC_DIR/$f"
+    done
+    # Crypto Extensions backend isolated to its own object; dispatcher in
+    # sha256.c picks it up at runtime when AT_HWCAP advertises SHA2.
+    $CC_ARM64 -O3 -march=armv8-a+crypto -fomit-frame-pointer -fPIC -c $INCLUDES "$SRC_DIR/sha256_hw_arm.c"
+    ar rcs libschnorr256k1.a field.o scalar.o point.o schnorr.o sha256.o sha256_hw_arm.o
+)
 echo "  → $(wc -c < "$OUTPUT_DIR/arm64-v8a/libschnorr256k1.a") bytes"
 
 # Build x86_64 static library (for emulator)
 if [ -f "$CC_X86" ]; then
     echo "Building x86_64..."
     mkdir -p "$OUTPUT_DIR/x86_64"
-    $CC_X86 -O3 -march=x86-64-v2 -mbmi2 -msha -msse4.1 -fomit-frame-pointer -fPIC -c \
-        -I"$SRC_DIR" -I"$PROJECT_ROOT/include" \
-        $(cd "$SRC_DIR" && for f in $SOURCES; do echo "$SRC_DIR/$f"; done) \
-    cd "$OUTPUT_DIR/x86_64"
-    ar rcs "$OUTPUT_DIR/x86_64/libschnorr256k1.a" field.o scalar.o point.o schnorr.o sha256.o
+    (
+        cd "$OUTPUT_DIR/x86_64"
+        # Baseline x86-64-v2 — no -msha here so the .so loads on emulator hosts
+        # whose CPU lacks SHA-NI (older Xeons, pre-Ice-Lake desktops).
+        for f in $BASE_SOURCES; do
+            $CC_X86 -O3 -march=x86-64-v2 -mbmi2 -msse4.1 -fomit-frame-pointer -fPIC -c $INCLUDES "$SRC_DIR/$f"
+        done
+        # SHA-NI backend isolated; dispatcher selects it via __builtin_cpu_supports("sha").
+        $CC_X86 -O3 -march=x86-64-v2 -mbmi2 -msha -mssse3 -msse4.1 -fomit-frame-pointer -fPIC -c $INCLUDES "$SRC_DIR/sha256_hw_x86.c"
+        ar rcs libschnorr256k1.a field.o scalar.o point.o schnorr.o sha256.o sha256_hw_x86.o
+    )
     echo "  → $(wc -c < "$OUTPUT_DIR/x86_64/libschnorr256k1.a") bytes"
 fi
 
