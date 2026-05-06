@@ -19,6 +19,25 @@
 #endif
 #endif
 
+#if SHA256_HW_X86_AVAILABLE
+#include <cpuid.h>
+/* Probe SHA-NI via cpuid directly. AppleClang's __builtin_cpu_supports does
+ * not accept "sha" as a feature string (errors out at compile time), so we
+ * read CPUID leaves ourselves — works the same on GCC, Clang, and AppleClang. */
+static int x86_cpu_has_shani_path(void) {
+    unsigned eax, ebx, ecx, edx;
+    /* Leaf 1: SSSE3 (ECX bit 9), SSE4.1 (ECX bit 19). */
+    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return 0;
+    if (!(ecx & (1u << 9)))  return 0;
+    if (!(ecx & (1u << 19))) return 0;
+    /* Leaf 7 sub-leaf 0: SHA (EBX bit 29). */
+    if (__get_cpuid_max(0, NULL) < 7) return 0;
+    __cpuid_count(7, 0, eax, ebx, ecx, edx);
+    if (!(ebx & (1u << 29))) return 0;
+    return 1;
+}
+#endif
+
 static const uint32_t K[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
     0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -94,13 +113,10 @@ static sha256_transform_fn sha256_transform_dispatch = sha256_transform_sw;
 
 static int detect_sha_hw(void) {
 #if SHA256_HW_X86_AVAILABLE
-    __builtin_cpu_init();
     /* SHA-NI alone isn't enough — the transform also uses SSSE3/SSE4.1
      * shuffles. Modern CPUs that ship SHA-NI always ship SSE4.1, but be
      * explicit so a future micro-architecture without SSE4.1 can't trip us. */
-    if (__builtin_cpu_supports("sha")
-            && __builtin_cpu_supports("ssse3")
-            && __builtin_cpu_supports("sse4.1")) {
+    if (x86_cpu_has_shani_path()) {
         sha256_transform_dispatch = sha256_transform_shani;
         return 1;
     }
