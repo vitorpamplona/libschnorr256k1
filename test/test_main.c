@@ -95,6 +95,9 @@ extern void run_field_tests(void);
 extern void run_point_tests(void);
 extern void run_key_codec_tests(void);
 extern void run_sha256_tests(void);
+#ifdef SCHNORR256K1_TEST_THREADS
+extern void run_thread_tests(void);
+#endif
 
 /* ==================== Main ==================== */
 
@@ -113,6 +116,9 @@ int main(void) {
     run_key_codec_tests();
     run_schnorr_tests();
     run_secp256k1_tests();
+#ifdef SCHNORR256K1_TEST_THREADS
+    run_thread_tests();
+#endif
 
     printf("\n================================================================\n");
     if (tests_failed == 0) {

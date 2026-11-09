@@ -92,6 +92,44 @@ typedef struct {
     secp256k1_fe y;
 } secp256k1_ge;
 
+/* ==================== Cache slot lock ==================== */
+
+/*
+ * A spinlock for one slot of the shared caches (point tables, decompressed keys), held only to
+ * copy an entry in or out. slot_lock_acquire gives up after a few tries and returns 0: the
+ * caller then computes without the cache rather than wait. Zero-initialized means unlocked.
+ */
+typedef struct {
+    unsigned char held;
+} slot_lock;
+
+#if defined(__GNUC__) || defined(__clang__)
+static inline void slot_lock_pause(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+    __asm__ __volatile__("yield");
+#endif
+}
+
+static inline int slot_lock_acquire(slot_lock *l) {
+    for (int i = 0; i < 64; i++) {
+        if (__atomic_load_n(&l->held, __ATOMIC_RELAXED) == 0 &&
+            __atomic_exchange_n(&l->held, 1, __ATOMIC_ACQUIRE) == 0) {
+            return 1;
+        }
+        slot_lock_pause();
+    }
+    return 0;
+}
+
+static inline void slot_lock_release(slot_lock *l) {
+    __atomic_store_n(&l->held, 0, __ATOMIC_RELEASE);
+}
+#else
+#error "libschnorr256k1 needs GCC or Clang atomics for its shared caches"
+#endif
+
 /* ==================== Public API (see include/schnorr256k1.h) ==================== */
 
 #include "schnorr256k1.h"

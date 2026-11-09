@@ -59,6 +59,12 @@ static int tables_initialized = 0;
  * tweak-mul of the odd-y point left tables that verify then used for its even-y x-only key,
  * and rejected valid signatures (libschnorr256k1-bench's KI-3).
  *
+ * Threads share the cache. Each slot has a lock, held only to copy an entry in or out (the
+ * tables are built outside it), and a thread that cannot take it within a few tries builds
+ * its own tables: no one waits on another's work, and no reader can see a key with the tables
+ * of another (a forged signature verified against a key while another thread rewrote its slot
+ * for a colliding key, before the lock).
+ *
  * 1024 entries × 16 AffinePoints × 64 bytes ≈ 1MB. Acceptable for mobile.
  */
 #define P_TABLE_CACHE_SIZE 1024
@@ -66,11 +72,16 @@ static int tables_initialized = 0;
 #define P_TABLE_ENTRIES 8 /* 2^(wP-2) for wP=5 */
 
 typedef struct {
-    secp256k1_fe px;                          /* cache key: x-coordinate */
     secp256k1_ge p_odd[P_TABLE_ENTRIES];      /* affine odd-multiples of P */
     secp256k1_ge p_lam_odd[P_TABLE_ENTRIES];  /* affine odd-multiples of lambda(P) */
+} p_table_set;
+
+typedef struct {
+    secp256k1_fe px;                          /* cache key: x-coordinate */
+    p_table_set tables;
     int y_odd;                                /* parity of the y the tables were built for */
     int valid;
+    slot_lock lock;
 } cached_p_table;
 
 static cached_p_table p_table_cache[P_TABLE_CACHE_SIZE];
@@ -79,16 +90,22 @@ static int p_cache_slot(const secp256k1_fe *px) {
     return ((int)(px->d[0] ^ (px->d[1] << 3))) & P_TABLE_CACHE_MASK;
 }
 
-/* The wNAF-5 tables of affine P and lambda(P), from the cache or built into it. *flip is 1 when
- * they are the tables of -P: the caller negates each point it takes from them. */
-static const cached_p_table *p_tables(const secp256k1_ge *p, int *flip) {
+/* The wNAF-5 tables of affine P (on the curve) and lambda(P), copied from the cache or built
+ * (and offered to it), into out. *flip is 1 when they are the tables of -P: the caller negates
+ * each point it takes from them. */
+static void p_tables(p_table_set *out, const secp256k1_ge *p, int *flip) {
     cached_p_table *cached = &p_table_cache[p_cache_slot(&p->x)];
     const int y_odd = fe_is_odd(&p->y);
 
-    if (cached->valid && fe_equal(&cached->px, &p->x)) {
-        /* Same x on the curve: p is the cached point or its negation */
-        *flip = y_odd != cached->y_odd;
-        return cached;
+    if (slot_lock_acquire(&cached->lock)) {
+        int hit = cached->valid && fe_equal(&cached->px, &p->x);
+        if (hit) {
+            /* Same x on the curve: p is the cached point or its negation */
+            *out = cached->tables;
+            *flip = y_odd != cached->y_odd;
+        }
+        slot_lock_release(&cached->lock);
+        if (hit) return;
     }
 
     secp256k1_gej pj, p2j;
@@ -107,14 +124,18 @@ static const cached_p_table *p_tables(const secp256k1_ge *p, int *flip) {
         p_lam_jac[i].infinity = 0;
     }
 
-    batch_to_affine(cached->p_odd, p_odd_jac, P_TABLE_ENTRIES);
-    batch_to_affine(cached->p_lam_odd, p_lam_jac, P_TABLE_ENTRIES);
-    cached->px = p->x;
-    fe_normalize(&cached->px);
-    cached->y_odd = y_odd;
-    cached->valid = 1;
+    batch_to_affine(out->p_odd, p_odd_jac, P_TABLE_ENTRIES);
+    batch_to_affine(out->p_lam_odd, p_lam_jac, P_TABLE_ENTRIES);
     *flip = 0;
-    return cached;
+
+    if (slot_lock_acquire(&cached->lock)) {
+        cached->px = p->x;
+        fe_normalize(&cached->px);
+        cached->tables = *out;
+        cached->y_odd = y_odd;
+        cached->valid = 1;
+        slot_lock_release(&cached->lock);
+    }
 }
 
 /* ==================== Point Operations ==================== */
@@ -394,11 +415,16 @@ int point_lift_x(secp256k1_fe *out_x, secp256k1_fe *out_y, const secp256k1_fe *x
     return 1;
 }
 
+/* A 33-byte compressed (02/03) or 65-byte uncompressed (04) key: coordinates below p and the
+ * point on the curve, or 0. Unchecked, an off-curve point reached the shared table cache under a
+ * real key's x (every valid signature by that key then failed) and gave invalid-curve results
+ * for secret tweaks. */
 int point_parse_pubkey(secp256k1_ge *r, const uint8_t *pubkey, size_t len) {
     secp256k1_fe x;
 
     if (len == 33 && (pubkey[0] == 0x02 || pubkey[0] == 0x03)) {
         fe_from_bytes(&x, pubkey + 1);
+        if (fe_cmp(&x, &FE_P) >= 0) return 0;
         secp256k1_fe y;
         if (!point_lift_x(&r->x, &y, &x)) return 0;
         r->y = y;
@@ -414,7 +440,15 @@ int point_parse_pubkey(secp256k1_ge *r, const uint8_t *pubkey, size_t len) {
     } else if (len == 65 && pubkey[0] == 0x04) {
         fe_from_bytes(&r->x, pubkey + 1);
         fe_from_bytes(&r->y, pubkey + 33);
-        return 1;
+        if (fe_cmp(&r->x, &FE_P) >= 0 || fe_cmp(&r->y, &FE_P) >= 0) return 0;
+        /* y^2 == x^3 + 7 */
+        secp256k1_fe y2, x3;
+        static const secp256k1_fe SEVEN = {{7, 0, 0, 0}};
+        fe_sqr(&y2, &r->y);
+        fe_sqr(&x3, &r->x);
+        fe_mul(&x3, &x3, &r->x);
+        fe_add(&x3, &x3, &SEVEN);
+        return fe_equal(&y2, &x3);
     }
     return 0;
 }
@@ -640,9 +674,10 @@ void ecmult(secp256k1_gej *r, const secp256k1_ge *p, const secp256k1_scalar *sca
     /* P-side tables: from the cache shared with ecmult_double_g.
      * For ECDH, the same peer key is used repeatedly (NIP-44 conversations). */
     int flip;
-    const cached_p_table *tables = p_tables(p, &flip);
-    const secp256k1_ge *p_odd = tables->p_odd;
-    const secp256k1_ge *p_lam_odd = tables->p_lam_odd;
+    p_table_set tables;
+    p_tables(&tables, p, &flip);
+    const secp256k1_ge *p_odd = tables.p_odd;
+    const secp256k1_ge *p_lam_odd = tables.p_lam_odd;
     split.neg_k1 ^= flip;
     split.neg_k2 ^= flip;
 
@@ -706,9 +741,10 @@ void ecmult_double_g(secp256k1_gej *r, const secp256k1_scalar *s_scalar,
 
     /* P-side tables: from the cache, built only on a miss */
     int flip;
-    const cached_p_table *tables = p_tables(p, &flip);
-    const secp256k1_ge *p_odd = tables->p_odd;
-    const secp256k1_ge *p_lam_odd = tables->p_lam_odd;
+    p_table_set tables;
+    p_tables(&tables, p, &flip);
+    const secp256k1_ge *p_odd = tables.p_odd;
+    const secp256k1_ge *p_lam_odd = tables.p_lam_odd;
     e_split.neg_k1 ^= flip;
     e_split.neg_k2 ^= flip;
 
