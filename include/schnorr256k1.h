@@ -100,8 +100,11 @@ int secp256k1c_schnorr_verify_fast(
 );
 
 /* Batch verification of N signatures from the SAME pubkey.
- * More efficient than N individual verifications.
- * Returns 1 if ALL signatures are valid, 0 if any is invalid. */
+ * BIP-340's batch equation, with a 128-bit weight per signature (after the first) derived from
+ * a tagged hash ("BIP0340/batch") of the key, every message and every signature, so invalid
+ * signatures cannot be made to cancel. Faster than N individual verifications from N = 2 on.
+ * Returns 1 if ALL signatures are valid, 0 if any is invalid (or count > 0 and pub32 or a
+ * signature is NULL); 1 for count = 0. Variable time: public inputs only. */
 int secp256k1c_schnorr_verify_batch(
     const uint8_t *pub32,
     const uint8_t *const *sigs64,

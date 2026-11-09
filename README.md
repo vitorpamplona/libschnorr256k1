@@ -11,7 +11,7 @@ and hardware-accelerated SHA-256 uses native instructions on ARM64 and x86_64.
 
 - **BIP-340 Schnorr signatures** — sign, verify, and batch-verify
 - **Variable-length messages** — not limited to 32-byte hashes
-- **Same-pubkey batch verification** — randomized linear combination
+- **Same-pubkey batch verification** — BIP-340's weighted batch equation, 128-bit weights
 - **Fast verify** — skip y-parity check (safe for Nostr x-only pubkeys)
 - **X-only ECDH** — shared secret for NIP-44 encryption
 - **Key operations** — create, compress, tweak-add, tweak-mul
@@ -123,14 +123,14 @@ cd build
 ctest
 ```
 
-The test suite includes 103 tests across 6 files:
+The test suite includes 112 tests across 6 files:
 
 | File | Tests | Coverage |
 |------|-------|----------|
-| `test_schnorr.c` | 21 | Full BIP-340 test vectors (0-18), sign/verify round-trip |
-| `test_secp256k1.c` | 23 | Key ops, ECDH symmetry, batch verify, tagged hash |
-| `test_field.c` | 23 | Field arithmetic mod p, carry-fold regression |
-| `test_point.c` | 13 | EC point doubling, addition, scalar multiplication |
+| `test_schnorr.c` | 22 | Full BIP-340 test vectors (0-18), sign/verify round-trip |
+| `test_secp256k1.c` | 26 | Key ops, ECDH symmetry, batch verify, tagged hash |
+| `test_field.c` | 29 | Field arithmetic mod p, carry-fold regression |
+| `test_point.c` | 14 | EC point doubling, addition, scalar multiplication |
 | `test_key_codec.c` | 13 | Key parsing, serialization, liftX |
 | `test_sha256.c` | 8 | SHA-256 KATs, tagged hash consistency |
 
@@ -217,7 +217,7 @@ libschnorr256k1/
 │   ├── schnorr.c              # BIP-340, key ops, ECDH, SHA wrappers
 │   ├── sha256.c / sha256.h    # SHA-256 + tagged hashes
 │   └── sha256_hw.h            # HW-accelerated SHA-256
-├── test/                      # 103 tests
+├── test/                      # 112 tests
 ├── bench/                     # Standalone benchmark
 ├── scripts/                   # Android NDK build script
 ├── CMakeLists.txt
