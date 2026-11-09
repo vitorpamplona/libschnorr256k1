@@ -333,13 +333,13 @@ static double bench_theirs_sign_cached(secp256k1_context *ctx,
     return now_ms() - start;
 }
 
-static double bench_ours_sign_cached(const uint8_t *xonly,
+static double bench_ours_sign_cached(const uint8_t *pub33,
                                      const uint8_t *msg32, int iters) {
     uint8_t sig[64];
     double start = now_ms();
     for (int i = 0; i < iters; i++) {
-        secp256k1c_schnorr_sign_xonly(sig, msg32, 32, TEST_PRIVKEY, xonly,
-                                      TEST_AUXRAND);
+        secp256k1c_schnorr_sign_with_pubkey(sig, msg32, 32, TEST_PRIVKEY, pub33,
+                                            TEST_AUXRAND);
     }
     return now_ms() - start;
 }
@@ -544,7 +544,7 @@ int main(void) {
 
     /* signSchnorr (cached key) */
     theirs_ms = bench_theirs_sign_cached(ctx, &kp, msg, N);
-    ours_ms = bench_ours_sign_cached(xonly, msg, N);
+    ours_ms = bench_ours_sign_cached(pub33, msg, N);
     print_row("signSchnorr (cached pubkey)", us_per_op(theirs_ms, N),
               us_per_op(ours_ms, N));
 
@@ -598,7 +598,7 @@ int main(void) {
 
     /* Cached pubkey sign */
     theirs_ms = bench_theirs_sign_full(ctx, msg, N);
-    ours_ms = bench_ours_sign_cached(xonly, msg, N);
+    ours_ms = bench_ours_sign_cached(pub33, msg, N);
     print_row("Cached pubkey sign", us_per_op(theirs_ms, N),
               us_per_op(ours_ms, N));
 

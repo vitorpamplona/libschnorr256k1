@@ -245,9 +245,35 @@ int secp256k1c_schnorr_sign_xonly(
     scalar_from_bytes(&d0, seckey32);
     if (!scalar_is_valid(&d0)) return 0;
 
-    /* BIP-340 x-only pubkeys always have even y by convention.
-     * The caller must ensure the private key produces an even-y pubkey. */
-    return schnorr_sign_internal(sig64, msg, msg_len, &d0, xonly_pub32, 1, auxrand32);
+    /* BIP-340 negates the secret key when d*G has odd y, and an x-only key does not say which
+     * it is, so derive d*G. (This used to assume even y: odd-y keys got invalid signatures.)
+     * secp256k1c_schnorr_sign_with_pubkey takes the parity from a compressed key instead. */
+    secp256k1_gej pj;
+    ecmult_gen(&pj, &d0);
+    secp256k1_ge p;
+    if (!gej_to_ge(&p, &pj)) return 0;
+    uint8_t pub_x[32];
+    fe_to_bytes(pub_x, &p.x);
+    if (memcmp(pub_x, xonly_pub32, 32) != 0) return 0; /* not seckey32's public key */
+
+    return schnorr_sign_internal(sig64, msg, msg_len, &d0, pub_x, point_has_even_y(&p.y), auxrand32);
+}
+
+int secp256k1c_schnorr_sign_with_pubkey(
+    uint8_t *sig64,
+    const uint8_t *msg, size_t msg_len,
+    const uint8_t *seckey32,
+    const uint8_t *pub33,
+    const uint8_t *auxrand32
+) {
+    if (pub33[0] != 0x02 && pub33[0] != 0x03) return 0;
+    secp256k1_scalar d0;
+    scalar_from_bytes(&d0, seckey32);
+    if (!scalar_is_valid(&d0)) return 0;
+
+    /* The prefix carries the parity, so d*G is not derived: the caller vouches that pub33 is
+     * seckey32's public key (a wrong one gives an invalid signature). */
+    return schnorr_sign_internal(sig64, msg, msg_len, &d0, pub33 + 1, pub33[0] == 0x02, auxrand32);
 }
 
 /* ==================== Schnorr Verify (core) ==================== */

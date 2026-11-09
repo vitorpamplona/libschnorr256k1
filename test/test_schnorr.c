@@ -230,6 +230,63 @@ static void sign_verify_roundtrip(void) {
     ASSERT_TRUE(secp256k1c_schnorr_verify(sig, msg, 32, pub33 + 1));
 }
 
+/* ==================== Signing with a known public key (KI-2) ==================== */
+
+/* 64 secret keys from a counter: about half have an odd-y public key, which is where
+ * sign_xonly signed with the wrong secret before (libschnorr256k1-bench's KI-2). */
+static void known_key(uint8_t sec[32], int i) {
+    memset(sec, 0, 32);
+    sec[0] = 0x5A; sec[30] = (uint8_t)(i >> 8); sec[31] = (uint8_t)(i + 1);
+}
+
+static void sign_xonly_matches_sign_for_both_parities(void) {
+    int odd = 0, even = 0;
+    for (int i = 0; i < 64; i++) {
+        uint8_t sec[32], pub65[65], msg[32], aux[32], want[64], got[64];
+        known_key(sec, i);
+        ASSERT_TRUE(secp256k1c_pubkey_create(pub65, sec));
+        if (pub65[64] & 1) odd++; else even++;
+        memset(msg, i, 32); memset(aux, 0xA5 ^ i, 32);
+        ASSERT_TRUE(secp256k1c_schnorr_sign(want, msg, 32, sec, aux));
+        ASSERT_TRUE(secp256k1c_schnorr_sign_xonly(got, msg, 32, sec, pub65 + 1, aux));
+        ASSERT_TRUE(memcmp(got, want, 64) == 0);
+        ASSERT_TRUE(secp256k1c_schnorr_verify(got, msg, 32, pub65 + 1));
+    }
+    ASSERT_TRUE(odd > 0 && even > 0);
+}
+
+static void sign_xonly_rejects_another_keys_pubkey(void) {
+    uint8_t sec[32], other[32], pub65[65], msg[32], sig[64];
+    known_key(sec, 1); known_key(other, 2);
+    ASSERT_TRUE(secp256k1c_pubkey_create(pub65, other));
+    memset(msg, 7, 32);
+    ASSERT_TRUE(!secp256k1c_schnorr_sign_xonly(sig, msg, 32, sec, pub65 + 1, NULL));
+}
+
+static void sign_with_pubkey_matches_sign_for_both_parities(void) {
+    for (int i = 0; i < 64; i++) {
+        uint8_t sec[32], pub65[65], pub33[33], msg[32], aux[32], want[64], got[64];
+        known_key(sec, i);
+        ASSERT_TRUE(secp256k1c_pubkey_create(pub65, sec));
+        ASSERT_TRUE(secp256k1c_pubkey_compress(pub33, pub65));
+        memset(msg, 3 * i, 32); memset(aux, i, 32);
+        ASSERT_TRUE(secp256k1c_schnorr_sign(want, msg, 32, sec, aux));
+        ASSERT_TRUE(secp256k1c_schnorr_sign_with_pubkey(got, msg, 32, sec, pub33, aux));
+        ASSERT_TRUE(memcmp(got, want, 64) == 0);
+        ASSERT_TRUE(secp256k1c_schnorr_verify(got, msg, 32, pub33 + 1));
+    }
+}
+
+static void sign_with_pubkey_rejects_a_bad_prefix(void) {
+    uint8_t sec[32], pub65[65], pub33[33], msg[32], sig[64];
+    known_key(sec, 3);
+    ASSERT_TRUE(secp256k1c_pubkey_create(pub65, sec));
+    ASSERT_TRUE(secp256k1c_pubkey_compress(pub33, pub65));
+    memset(msg, 9, 32);
+    pub33[0] = 0x04;
+    ASSERT_TRUE(!secp256k1c_schnorr_sign_with_pubkey(sig, msg, 32, sec, pub33, NULL));
+}
+
 /* ==================== Runner ==================== */
 
 void run_schnorr_tests(void) {
@@ -259,6 +316,11 @@ void run_schnorr_tests(void) {
     TEST(bip340_vector12_fail);
     TEST(bip340_vector13_fail);
     TEST(bip340_vector14_fail);
+    /* Known public key */
+    TEST(sign_xonly_matches_sign_for_both_parities);
+    TEST(sign_xonly_rejects_another_keys_pubkey);
+    TEST(sign_with_pubkey_matches_sign_for_both_parities);
+    TEST(sign_with_pubkey_rejects_a_bad_prefix);
     /* Round-trip */
     TEST(sign_verify_roundtrip);
     printf("  Schnorr: done\n");
