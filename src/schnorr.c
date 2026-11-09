@@ -17,6 +17,7 @@
 static uint8_t CHALLENGE_PREFIX[64];
 static uint8_t AUX_PREFIX[64];
 static uint8_t NONCE_PREFIX[64];
+static uint8_t BATCH_PREFIX[64];
 static int prefixes_initialized = 0;
 
 static void init_prefixes(void) {
@@ -34,6 +35,10 @@ static void init_prefixes(void) {
     secp256k1_sha256_hash(tag_hash, (const uint8_t *)"BIP0340/nonce", 13);
     memcpy(NONCE_PREFIX, tag_hash, 32);
     memcpy(NONCE_PREFIX + 32, tag_hash, 32);
+
+    secp256k1_sha256_hash(tag_hash, (const uint8_t *)"BIP0340/batch", 13);
+    memcpy(BATCH_PREFIX, tag_hash, 32);
+    memcpy(BATCH_PREFIX + 32, tag_hash, 32);
 
     prefixes_initialized = 1;
 }
@@ -343,6 +348,108 @@ int secp256k1c_schnorr_verify_fast(
 
 /* ==================== Batch Verification ==================== */
 
+/*
+ * BIP-340 batch verification: for signatures (R_i, s_i) by one key P,
+ *
+ *     (sum a_i*s_i)*G == sum a_i*R_i + (sum a_i*e_i)*P
+ *
+ * with a_1 = 1 and the other a_i 128-bit weights from SHA-256 in counter mode, seeded by a tagged
+ * hash ("BIP0340/batch") of every input: the key, each message with its 4-byte big-endian
+ * length, and each signature. The same weights as libschnorr256k1-kotlin's verifySchnorrBatch.
+ * Without weights the check is a plain sum and errors cancel: (R_1, s_1 + d) and (R_2, s_2 - d)
+ * are both invalid and passed (libschnorr256k1-bench's KI-1). With them, making errors cancel
+ * means guessing a 128-bit weight before it is known.
+ *
+ * It is computed as Q = s*G - e*P - sum_{i>=2} a_i*R_i, which must be lift_x(r_1): Q has
+ * x = r_1 and an even y, as a single verification checks its R, so R_1 needs no square root.
+ * The R_i come in chunks of BATCH_CHUNK, each with a wNAF table of odd multiples (one
+ * inversion per chunk). The first chunk runs inside the G and P Strauss loop
+ * (ecmult_double_g_multi), sharing its doublings; any further chunk has a Strauss loop of its own.
+ */
+#define BATCH_CHUNK 64
+#define BATCH_WNAF_MAX 136 /* a 128-bit weight has at most 129 wNAF digits */
+
+/* a_i for i >= 1: 16 bytes of SHA-256(seed || be32(i / 2)), the first or second half. */
+static void batch_weight(secp256k1_scalar *a, const uint8_t seed[32], size_t i,
+                         uint8_t block[32], size_t *block_index) {
+    size_t bi = i >> 1;
+    if (*block_index != bi) {
+        uint8_t counter[36];
+        memcpy(counter, seed, 32);
+        counter[32] = (uint8_t)(bi >> 24); counter[33] = (uint8_t)(bi >> 16);
+        counter[34] = (uint8_t)(bi >> 8);  counter[35] = (uint8_t)bi;
+        secp256k1_sha256_hash(block, counter, 36);
+        *block_index = bi;
+    }
+    uint8_t bytes[32] = {0};
+    memcpy(bytes + 16, block + (i & 1) * 16, 16);
+    scalar_from_bytes(a, bytes);
+    if (scalar_is_zero(a)) a->d[0] = 1;
+}
+
+/* r (< p), s (< n) and e = H(r || pub || msg) of one signature. */
+static int batch_parse(secp256k1_fe *r, secp256k1_scalar *s, secp256k1_scalar *e,
+                       const uint8_t *sig, const uint8_t *pub32,
+                       const uint8_t *msg, size_t msg_len) {
+    fe_from_bytes(r, sig);
+    if (fe_cmp(r, &FE_P) >= 0) return 0;
+    scalar_from_bytes(s, sig + 32);
+    if (scalar_cmp(s, &SCALAR_N) >= 0) return 0;
+
+    uint8_t e_hash[32];
+    secp256k1_sha256 ctx;
+    secp256k1_sha256_init(&ctx);
+    secp256k1_sha256_update(&ctx, CHALLENGE_PREFIX, 64);
+    secp256k1_sha256_update(&ctx, sig, 32);
+    secp256k1_sha256_update(&ctx, pub32, 32);
+    secp256k1_sha256_update(&ctx, msg, msg_len);
+    secp256k1_sha256_finalize(&ctx, e_hash);
+    scalar_from_bytes(e, e_hash);
+    scalar_reduce(e);
+    return 1;
+}
+
+typedef struct {
+    secp256k1_ge table[BATCH_CHUNK * Q_TABLE_ENTRIES];
+    secp256k1_gej scratch[BATCH_CHUNK * Q_TABLE_ENTRIES];
+    secp256k1_ge r[BATCH_CHUNK];
+    int8_t wnaf[BATCH_CHUNK][BATCH_WNAF_MAX];
+    int wnaf_len[BATCH_CHUNK];
+    int count;
+    int max_len;
+} batch_chunk;
+
+/* Signatures [from, to) (from >= 1): adds a_i*s_i and a_i*e_i to the sums, and fills the chunk
+ * with each R_i's table and the wNAF digits of -a_i. */
+static int batch_prepare(batch_chunk *c, size_t from, size_t to, const uint8_t *pub32,
+                         const uint8_t *const *sigs64, const uint8_t *const *msgs,
+                         const size_t *msg_lens, const uint8_t seed[32], uint8_t block[32],
+                         size_t *block_index, secp256k1_scalar *s_sum, secp256k1_scalar *e_sum) {
+    int digits[BATCH_WNAF_MAX];
+    c->count = (int)(to - from);
+    c->max_len = 0;
+    for (size_t i = from; i < to; i++) {
+        size_t j = i - from;
+        secp256k1_fe r_fe;
+        secp256k1_scalar s, e, a, t;
+        if (!batch_parse(&r_fe, &s, &e, sigs64[i], pub32, msgs[i], msg_lens[i])) return 0;
+        if (!point_lift_x(&c->r[j].x, &c->r[j].y, &r_fe)) return 0;
+
+        batch_weight(&a, seed, i, block, block_index);
+        scalar_mul(&t, &a, &s);
+        scalar_add(s_sum, s_sum, &t);
+        scalar_mul(&t, &a, &e);
+        scalar_add(e_sum, e_sum, &t);
+
+        int len = wnaf_encode(digits, BATCH_WNAF_MAX, &a, Q_WINDOW);
+        for (int k = 0; k < len; k++) c->wnaf[j][k] = (int8_t)-digits[k];
+        c->wnaf_len[j] = len;
+        if (len > c->max_len) c->max_len = len;
+    }
+    ecmult_odd_multiples_affine(c->table, c->r, c->count, c->scratch);
+    return 1;
+}
+
 int secp256k1c_schnorr_verify_batch(
     const uint8_t *pub32,
     const uint8_t *const *sigs64,
@@ -354,80 +461,75 @@ int secp256k1c_schnorr_verify_batch(
     if (count == 1) return secp256k1c_schnorr_verify(sigs64[0], msgs[0], msg_lens[0], pub32);
     if (!pub32) return 0;
 
-    /* Decompress pubkey once */
     secp256k1_fe px, py;
     if (!lift_x_cached(&px, &py, pub32)) return 0;
 
-    /* Accumulators */
-    secp256k1_scalar s_sum = SCALAR_ZERO;
-    secp256k1_scalar e_sum = SCALAR_ZERO;
-    secp256k1_gej r_sum;
-    gej_set_infinity(&r_sum);
-
-    for (size_t i = 0; i < count; i++) {
-        const uint8_t *sig = sigs64[i];
-        const uint8_t *msg = msgs[i];
-        size_t msg_len = msg_lens[i];
-
-        if (!sig) return 0;
-
-        /* Parse r, s */
-        secp256k1_fe r_fe;
-        fe_from_bytes(&r_fe, sig);
-        if (fe_cmp(&r_fe, &FE_P) >= 0) return 0;
-
-        secp256k1_scalar s;
-        scalar_from_bytes(&s, sig + 32);
-        if (scalar_cmp(&s, &SCALAR_N) >= 0) return 0;
-
-        /* Accumulate s */
-        scalar_add(&s_sum, &s_sum, &s);
-
-        /* Challenge e_i */
-        uint8_t e_hash[32];
+    /* seed = tagged hash of pub || (len(msg_i) || msg_i)... || sig_i... */
+    uint8_t seed[32];
+    {
         secp256k1_sha256 ctx;
         secp256k1_sha256_init(&ctx);
-        secp256k1_sha256_update(&ctx, CHALLENGE_PREFIX, 64);
-        secp256k1_sha256_update(&ctx, sig, 32);
+        secp256k1_sha256_update(&ctx, BATCH_PREFIX, 64);
         secp256k1_sha256_update(&ctx, pub32, 32);
-        secp256k1_sha256_update(&ctx, msg, msg_len);
-        secp256k1_sha256_finalize(&ctx, e_hash);
-
-        secp256k1_scalar e;
-        scalar_from_bytes(&e, e_hash);
-        scalar_reduce(&e);
-        scalar_add(&e_sum, &e_sum, &e);
-
-        /* Lift R_i = liftX(r_i) */
-        secp256k1_fe rx, ry;
-        if (!point_lift_x(&rx, &ry, &r_fe)) return 0;
-
-        /* Accumulate R_sum += R_i */
-        if (gej_is_infinity(&r_sum)) {
-            gej_set_ge(&r_sum, &(secp256k1_ge){.x = rx, .y = ry});
-        } else {
-            secp256k1_ge r_aff = {.x = rx, .y = ry};
-            secp256k1_gej tmp;
-            gej_add_ge(&tmp, &r_sum, &r_aff);
-            r_sum = tmp;
+        for (size_t i = 0; i < count; i++) {
+            if (!sigs64[i]) return 0;
+            uint8_t len[4] = {(uint8_t)(msg_lens[i] >> 24), (uint8_t)(msg_lens[i] >> 16),
+                              (uint8_t)(msg_lens[i] >> 8), (uint8_t)msg_lens[i]};
+            secp256k1_sha256_update(&ctx, len, 4);
+            secp256k1_sha256_update(&ctx, msgs[i], msg_lens[i]);
         }
+        for (size_t i = 0; i < count; i++) secp256k1_sha256_update(&ctx, sigs64[i], 64);
+        secp256k1_sha256_finalize(&ctx, seed);
+    }
+    uint8_t block[32];
+    size_t block_index = (size_t)-1;
+
+    /* Signature 1, weight 1 */
+    secp256k1_fe r1;
+    secp256k1_scalar s_sum, e_sum;
+    if (!batch_parse(&r1, &s_sum, &e_sum, sigs64[0], pub32, msgs[0], msg_lens[0])) return 0;
+
+    batch_chunk chunk;
+
+    /* Chunks after the first: extra = -sum a_i*R_i over them, each with its own Strauss loop */
+    secp256k1_gej extra;
+    gej_set_infinity(&extra);
+    for (size_t from = 1 + BATCH_CHUNK; from < count; from += BATCH_CHUNK) {
+        size_t to = from + BATCH_CHUNK < count ? from + BATCH_CHUNK : count;
+        if (!batch_prepare(&chunk, from, to, pub32, sigs64, msgs, msg_lens, seed, block,
+                           &block_index, &s_sum, &e_sum)) return 0;
+        secp256k1_gej acc;
+        gej_set_infinity(&acc);
+        for (int bit = chunk.max_len - 1; bit >= 0; bit--) {
+            gej_double(&acc, &acc);
+            for (int j = 0; j < chunk.count; j++) {
+                if (bit >= chunk.wnaf_len[j]) continue;
+                int d = chunk.wnaf[j][bit];
+                if (d == 0) continue;
+                secp256k1_ge pt = chunk.table[j * Q_TABLE_ENTRIES + (d > 0 ? d : -d) / 2];
+                if (d < 0) fe_negate(&pt.y, &pt.y, 1);
+                gej_add_ge(&acc, &acc, &pt);
+            }
+        }
+        gej_add(&extra, &extra, &acc);
     }
 
-    /* Q = s_sum*G + (-e_sum)*P */
+    /* The first chunk, inside the G and P loop: Q = s*G - e*P - sum a_i*R_i */
+    size_t first_to = 1 + BATCH_CHUNK < count ? 1 + BATCH_CHUNK : count;
+    if (!batch_prepare(&chunk, 1, first_to, pub32, sigs64, msgs, msg_lens, seed, block,
+                       &block_index, &s_sum, &e_sum)) return 0;
     scalar_negate(&e_sum, &e_sum);
     secp256k1_ge p_aff = {.x = px, .y = py};
     secp256k1_gej q;
-    ecmult_double_g(&q, &s_sum, &p_aff, &e_sum);
+    ecmult_double_g_multi(&q, &s_sum, &p_aff, &e_sum, chunk.table, &chunk.wnaf[0][0],
+                          BATCH_WNAF_MAX, chunk.wnaf_len, chunk.count);
+    gej_add(&q, &q, &extra);
 
-    /* Check Q - R_sum == infinity */
-    /* Negate R_sum.y */
-    fe_negate(&r_sum.y, &r_sum.y, 1);
-    fe_normalize(&r_sum.y);
-
-    secp256k1_gej result;
-    gej_add(&result, &q, &r_sum);
-
-    return gej_is_infinity(&result);
+    /* Q must be lift_x(r_1): x = r_1 and y even */
+    secp256k1_ge q_aff;
+    if (!gej_to_ge_var(&q_aff, &q)) return 0;
+    if (!fe_equal(&q_aff.x, &r1)) return 0;
+    return point_has_even_y(&q_aff.y);
 }
 
 /* ==================== Tweak Operations ==================== */

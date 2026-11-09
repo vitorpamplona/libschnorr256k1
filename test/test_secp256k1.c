@@ -5,6 +5,7 @@
  */
 #include "test_framework.h"
 #include "schnorr256k1.h"
+#include "scalar.h"
 
 /* ==================== secKeyVerify ==================== */
 
@@ -272,6 +273,137 @@ static void batch_large(void) {
     ASSERT_TRUE(secp256k1c_schnorr_verify_batch(pub33 + 1, sig_ptrs, msg_ptrs, lens, 32));
 }
 
+/* KI-1 (libschnorr256k1-bench): an unweighted batch sums the signatures, so two invalid ones
+ * whose errors cancel, (R1, s1 + d) and (R2, s2 - d), passed. BIP-340's weights stop it. */
+static void sign_n(uint8_t sigs[][64], uint8_t msgs[][32], const uint8_t **sp, const uint8_t **mp,
+                   size_t *lens, int n, const uint8_t *sec, int salt) {
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < 32; j++) msgs[i][j] = (uint8_t)(i * 31 + j + salt);
+        ASSERT_TRUE(secp256k1c_schnorr_sign(sigs[i], msgs[i], 32, sec, NULL));
+        sp[i] = sigs[i]; mp[i] = msgs[i]; lens[i] = 32;
+    }
+}
+
+static void add_to_s(uint8_t sig[64], const secp256k1_scalar *d) {
+    secp256k1_scalar s;
+    scalar_from_bytes(&s, sig + 32);
+    scalar_add(&s, &s, d);
+    scalar_to_bytes(sig + 32, &s);
+}
+
+static void batch_rejects_cancelling_signatures(void) {
+    HEX32(sec, "67E56582298859DDAE725F972992A07C6C4FB9F62A8FFF58CE3CA926A1063530");
+    uint8_t pub65[65];
+    ASSERT_TRUE(secp256k1c_pubkey_create(pub65, sec));
+    for (int n = 2; n <= 40; n += 19) { /* 2, 21, 40: the pair alone, and inside larger batches */
+        uint8_t sigs[40][64], msgs[40][32];
+        const uint8_t *sp[40], *mp[40];
+        size_t lens[40];
+        sign_n(sigs, msgs, sp, mp, lens, n, sec, n);
+        ASSERT_TRUE(secp256k1c_schnorr_verify_batch(pub65 + 1, sp, mp, lens, (size_t)n));
+        secp256k1_scalar d = SCALAR_ZERO, neg_d;
+        d.d[0] = 0x1234567;
+        scalar_negate(&neg_d, &d);
+        add_to_s(sigs[0], &d);
+        add_to_s(sigs[n - 1], &neg_d);
+        ASSERT_FALSE(secp256k1c_schnorr_verify(sigs[0], msgs[0], 32, pub65 + 1));
+        ASSERT_FALSE(secp256k1c_schnorr_verify(sigs[n - 1], msgs[n - 1], 32, pub65 + 1));
+        ASSERT_FALSE(secp256k1c_schnorr_verify_batch(pub65 + 1, sp, mp, lens, (size_t)n));
+    }
+}
+
+/* Valid batches of every size from 2 to 140 pass (one, two and three internal chunks), and one
+ * bad signature anywhere (first, second, middle, last) makes the batch fail. */
+static void batch_sizes_and_single_errors(void) {
+    HEX32(sec, "3982F19BEF1615BCCFBB05E321C10E1D4CBA3DF0E841C2E41EEB6016347653C3");
+    uint8_t pub65[65];
+    ASSERT_TRUE(secp256k1c_pubkey_create(pub65, sec));
+    enum { MAX = 140 };
+    static uint8_t sigs[MAX][64], msgs[MAX][32];
+    const uint8_t *sp[MAX], *mp[MAX];
+    size_t lens[MAX];
+    sign_n(sigs, msgs, sp, mp, lens, MAX, sec, 0);
+    for (int n = 2; n <= MAX; n++) {
+        ASSERT_TRUE(secp256k1c_schnorr_verify_batch(pub65 + 1, sp, mp, lens, (size_t)n));
+        int bad[4] = {0, 1, n / 2, n - 1};
+        for (int b = 0; b < 4; b++) {
+            sigs[bad[b]][40] ^= 0x10;
+            ASSERT_FALSE(secp256k1c_schnorr_verify_batch(pub65 + 1, sp, mp, lens, (size_t)n));
+            sigs[bad[b]][40] ^= 0x10;
+        }
+    }
+}
+
+/* The first signature is checked without lifting its R (the batch's result must be
+ * lift_x(r_1)), so its own failures each need a test: r_1 >= p, r_1 not on the curve, s_1 >= n,
+ * and a signature whose R comes out as -lift_x(r_1) (right x, odd y), which only the parity check
+ * rejects. */
+static void batch_rejects_bad_first_signature(void) {
+    HEX32(sec, "B7E151628AED2A6ABF7158809CF4F3C762E7160F38B4DA56A784D9045190CFEF");
+    uint8_t pub65[65];
+    ASSERT_TRUE(secp256k1c_pubkey_create(pub65, sec));
+    enum { N = 70 };
+    static uint8_t sigs[N][64], msgs[N][32];
+    const uint8_t *sp[N], *mp[N];
+    size_t lens[N];
+    sign_n(sigs, msgs, sp, mp, lens, N, sec, 5);
+    const size_t sizes[3] = {2, 30, N};
+    uint8_t saved[64];
+    memcpy(saved, sigs[0], 64);
+
+    for (int k = 0; k < 3; k++) {
+        size_t n = sizes[k];
+        ASSERT_TRUE(secp256k1c_schnorr_verify_batch(pub65 + 1, sp, mp, lens, n));
+
+        /* r_1 = p */
+        HEX32(p_bytes, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
+        memcpy(sigs[0], p_bytes, 32);
+        ASSERT_FALSE(secp256k1c_schnorr_verify_batch(pub65 + 1, sp, mp, lens, n));
+        memcpy(sigs[0], saved, 64);
+
+        /* r_1 = 5: x^3 + 7 = 132 is not a square mod p */
+        memset(sigs[0], 0, 32);
+        sigs[0][31] = 5;
+        ASSERT_FALSE(secp256k1c_schnorr_verify_batch(pub65 + 1, sp, mp, lens, n));
+        memcpy(sigs[0], saved, 64);
+
+        /* s_1 = n */
+        HEX32(n_bytes, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
+        memcpy(sigs[0] + 32, n_bytes, 32);
+        ASSERT_FALSE(secp256k1c_schnorr_verify_batch(pub65 + 1, sp, mp, lens, n));
+        memcpy(sigs[0], saved, 64);
+    }
+
+    /* s_1' = 2*e_1*d - s_1, d the secret of the even-y key: s_1'*G - e_1*P = -R_1 */
+    secp256k1_scalar d, e, s, t;
+    scalar_from_bytes(&d, sec);
+    if (pub65[64] & 1) scalar_negate(&d, &d);
+    uint8_t pre[96], e_bytes[32];
+    memcpy(pre, saved, 32);
+    memcpy(pre + 32, pub65 + 1, 32);
+    memcpy(pre + 64, msgs[0], 32);
+    secp256k1c_tagged_hash(e_bytes, "BIP0340/challenge", pre, 96);
+    scalar_from_bytes(&e, e_bytes);
+    scalar_reduce(&e);
+    scalar_from_bytes(&s, saved + 32);
+    scalar_mul(&t, &e, &d);
+    scalar_add(&t, &t, &t);
+    scalar_negate(&s, &s);
+    scalar_add(&s, &t, &s);
+    scalar_to_bytes(sigs[0] + 32, &s);
+    ASSERT_FALSE(secp256k1c_schnorr_verify(sigs[0], msgs[0], 32, pub65 + 1));
+    for (int k = 0; k < 3; k++) {
+        ASSERT_FALSE(secp256k1c_schnorr_verify_batch(pub65 + 1, sp, mp, lens, sizes[k]));
+    }
+    /* The same signature second in the batch, where its R is lifted (even y) like the others */
+    memcpy(sigs[1], sigs[0], 64);
+    memcpy(msgs[1], msgs[0], 32);
+    memcpy(sigs[0], saved, 64);
+    for (int k = 0; k < 3; k++) {
+        ASSERT_FALSE(secp256k1c_schnorr_verify_batch(pub65 + 1, sp, mp, lens, sizes[k]));
+    }
+}
+
 /* ==================== Tagged Hash ==================== */
 
 static void tagged_hash_consistency(void) {
@@ -325,6 +457,9 @@ void run_secp256k1_tests(void) {
     TEST(batch_empty);
     TEST(batch_single);
     TEST(batch_large);
+    TEST(batch_rejects_cancelling_signatures);
+    TEST(batch_sizes_and_single_errors);
+    TEST(batch_rejects_bad_first_signature);
     /* Tagged hash */
     TEST(tagged_hash_consistency);
     printf("  secp256k1: done\n");

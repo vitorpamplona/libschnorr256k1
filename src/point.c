@@ -451,6 +451,56 @@ void batch_to_affine(secp256k1_ge *out, const secp256k1_gej *in, int count) {
 
 /* ==================== Table Initialization ==================== */
 
+void ecmult_odd_multiples_affine(secp256k1_ge *out, const secp256k1_ge *pts, int count,
+                                 secp256k1_gej *jac) {
+    const int T = Q_TABLE_ENTRIES;
+    const int n = count * T;
+    if (count <= 0) return;
+
+    for (int j = 0; j < count; j++) {
+        /* D = 2Q = (X, Y, Z). On the isomorphic curve y^2 = x^3 + 7*Z^6, the map
+         * (x, y) -> (x*Z^2, y*Z^3) sends D to the affine (X, Y) and Q to (x*Z^2, y*Z^3, 1), so
+         * each odd multiple is one mixed addition there. The addition formulas don't use the
+         * curve constant, and a point (X', Y', Z') there is (X', Y', Z'*Z) on secp256k1. */
+        secp256k1_gej q, d;
+        gej_set_ge(&q, &pts[j]);
+        gej_double(&d, &q);
+        secp256k1_ge d_iso = { .x = d.x, .y = d.y };
+        secp256k1_fe z2, z3;
+        fe_sqr(&z2, &d.z);
+        fe_mul(&z3, &z2, &d.z);
+        secp256k1_gej *t = &jac[j * T];
+        fe_mul(&t[0].x, &pts[j].x, &z2);
+        fe_mul(&t[0].y, &pts[j].y, &z3);
+        t[0].z = FE_ONE;
+        t[0].infinity = 0;
+        for (int k = 1; k < T; k++) gej_add_ge(&t[k], &t[k - 1], &d_iso);
+        for (int k = 0; k < T; k++) fe_mul(&t[k].z, &t[k].z, &d.z);
+    }
+
+    /* Montgomery's trick, the running products of the Z's kept in out[i].x until out[i] is
+     * written (backwards, so out[i - 1].x still holds its product when out[i] needs it). Odd
+     * multiples kQ with k < 2*Q_TABLE_ENTRIES of a point of prime order n are never infinity. */
+    out[0].x = jac[0].z;
+    for (int i = 1; i < n; i++) fe_mul(&out[i].x, &out[i - 1].x, &jac[i].z);
+    secp256k1_fe inv, zi, zi2, zi3;
+    fe_inv_var(&inv, &out[n - 1].x);
+    for (int i = n - 1; i >= 0; i--) {
+        if (i > 0) {
+            fe_mul(&zi, &inv, &out[i - 1].x);
+            fe_mul(&inv, &inv, &jac[i].z);
+        } else {
+            zi = inv;
+        }
+        fe_sqr(&zi2, &zi);
+        fe_mul(&zi3, &zi2, &zi);
+        fe_mul(&out[i].x, &jac[i].x, &zi2);
+        fe_mul(&out[i].y, &jac[i].y, &zi3);
+        fe_normalize_full(&out[i].x);
+        fe_normalize_full(&out[i].y);
+    }
+}
+
 static void build_g_odd_table(void) {
     secp256k1_gej g, g2;
     gej_set_ge(&g, &SECP256K1_G);
@@ -669,6 +719,13 @@ void ecmult(secp256k1_gej *r, const secp256k1_gej *p, const secp256k1_scalar *sc
 /* Dual scalar multiplication: r = s*G + e*P (Strauss + GLV) */
 void ecmult_double_g(secp256k1_gej *r, const secp256k1_scalar *s_scalar,
                      const secp256k1_ge *p, const secp256k1_scalar *e_scalar) {
+    ecmult_double_g_multi(r, s_scalar, p, e_scalar, NULL, NULL, 0, NULL, 0);
+}
+
+void ecmult_double_g_multi(secp256k1_gej *r, const secp256k1_scalar *s_scalar,
+                           const secp256k1_ge *p, const secp256k1_scalar *e_scalar,
+                           const secp256k1_ge *q_tables, const int8_t *q_wnaf, int q_stride,
+                           const int *q_len, int q_count) {
     int wP = 5;
     int p_table_size = 1 << (wP - 2); /* 8 */
 
@@ -736,6 +793,9 @@ void ecmult_double_g(secp256k1_gej *r, const secp256k1_scalar *s_scalar,
            wnaf_e1[bits-1] == 0 && wnaf_e2[bits-1] == 0) {
         bits--;
     }
+    for (int j = 0; j < q_count; j++) {
+        if (q_len[j] > bits) bits = q_len[j];
+    }
 
     gej_set_infinity(r);
 
@@ -790,6 +850,16 @@ void ecmult_double_g(secp256k1_gej *r, const secp256k1_scalar *s_scalar,
                 fe_negate(&pt.y, &pt.y, 1);
                 fe_normalize(&pt.y);
             }
+            gej_add_ge(r, r, &pt);
+        }
+
+        /* Extra points Q_j, each with its own wNAF digits and affine odd-multiples table */
+        for (int j = 0; j < q_count; j++) {
+            if (i >= q_len[j]) continue;
+            d = q_wnaf[j * q_stride + i];
+            if (d == 0) continue;
+            pt = q_tables[j * Q_TABLE_ENTRIES + (d > 0 ? d : -d) / 2];
+            if (d < 0) fe_negate(&pt.y, &pt.y, 1);
             gej_add_ge(r, r, &pt);
         }
     }

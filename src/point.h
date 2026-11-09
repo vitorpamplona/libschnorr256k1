@@ -57,6 +57,26 @@ void ecmult(secp256k1_gej *r, const secp256k1_gej *p, const secp256k1_scalar *sc
 void ecmult_double_g(secp256k1_gej *r, const secp256k1_scalar *s,
                      const secp256k1_ge *p, const secp256k1_scalar *e);
 
+/* wNAF window of the extra points in ecmult_double_g_multi, and their odd multiples
+ * Q, 3Q, ..., (2*Q_TABLE_ENTRIES - 1)Q. */
+#define Q_WINDOW 4
+#define Q_TABLE_ENTRIES (1 << (Q_WINDOW - 2))
+
+/* out = s*G + e*P + sum_j q_j*Q_j, all in one Strauss loop, sharing its doublings. Each Q_j comes
+ * as its affine odd multiples (q_tables[j*Q_TABLE_ENTRIES ..], from ecmult_odd_multiples_affine)
+ * and the wNAF digits (window Q_WINDOW) of q_j (q_wnaf[j*q_stride ..], q_len[j] digits, at most 144).
+ * Variable time: public values only. */
+void ecmult_double_g_multi(secp256k1_gej *r, const secp256k1_scalar *s,
+                           const secp256k1_ge *p, const secp256k1_scalar *e,
+                           const secp256k1_ge *q_tables, const int8_t *q_wnaf, int q_stride,
+                           const int *q_len, int q_count);
+
+/* The affine odd multiples Q, 3Q, ..., (2*Q_TABLE_ENTRIES - 1)Q of each of count affine points, to
+ * out[j*Q_TABLE_ENTRIES + k], with one inversion for all of them. jac is scratch for
+ * count*Q_TABLE_ENTRIES points. Variable time: public points only. */
+void ecmult_odd_multiples_affine(secp256k1_ge *out, const secp256k1_ge *pts, int count,
+                                 secp256k1_gej *jac);
+
 /* ==================== Key/Point Codec ==================== */
 
 /* Decompress x-only pubkey: lift x to (x, y) with even y */
