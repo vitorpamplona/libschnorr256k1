@@ -450,6 +450,54 @@ static int batch_prepare(batch_chunk *c, size_t from, size_t to, const uint8_t *
     return 1;
 }
 
+/* The rest of the batch once signature 1 is parsed, with the chunk buffers on the heap. */
+static int batch_finish(batch_chunk *chunk, const uint8_t *pub32, const uint8_t *const *sigs64,
+                        const uint8_t *const *msgs, const size_t *msg_lens, size_t count,
+                        const uint8_t seed[32], uint8_t block[32], size_t *block_index,
+                        const secp256k1_fe *r1, secp256k1_scalar s_sum, secp256k1_scalar e_sum,
+                        const secp256k1_fe *px, const secp256k1_fe *py) {
+
+    /* Chunks after the first: extra = -sum a_i*R_i over them, each with its own Strauss loop */
+    secp256k1_gej extra;
+    gej_set_infinity(&extra);
+    for (size_t from = 1 + BATCH_CHUNK; from < count; from += BATCH_CHUNK) {
+        size_t to = from + BATCH_CHUNK < count ? from + BATCH_CHUNK : count;
+        if (!batch_prepare(chunk, from, to, pub32, sigs64, msgs, msg_lens, seed, block,
+                           block_index, &s_sum, &e_sum)) return 0;
+        secp256k1_gej acc;
+        gej_set_infinity(&acc);
+        for (int bit = chunk->max_len - 1; bit >= 0; bit--) {
+            gej_double(&acc, &acc);
+            for (int j = 0; j < chunk->count; j++) {
+                if (bit >= chunk->wnaf_len[j]) continue;
+                int d = chunk->wnaf[j][bit];
+                if (d == 0) continue;
+                secp256k1_ge pt = chunk->table[j * Q_TABLE_ENTRIES + (d > 0 ? d : -d) / 2];
+                if (d < 0) fe_negate(&pt.y, &pt.y, 1);
+                gej_add_ge(&acc, &acc, &pt);
+            }
+        }
+        gej_add(&extra, &extra, &acc);
+    }
+
+    /* The first chunk, inside the G and P loop: Q = s*G - e*P - sum a_i*R_i */
+    size_t first_to = 1 + BATCH_CHUNK < count ? 1 + BATCH_CHUNK : count;
+    if (!batch_prepare(chunk, 1, first_to, pub32, sigs64, msgs, msg_lens, seed, block,
+                       block_index, &s_sum, &e_sum)) return 0;
+    scalar_negate(&e_sum, &e_sum);
+    secp256k1_ge p_aff = {.x = *px, .y = *py};
+    secp256k1_gej q;
+    ecmult_double_g_multi(&q, &s_sum, &p_aff, &e_sum, chunk->table, &chunk->wnaf[0][0],
+                          BATCH_WNAF_MAX, chunk->wnaf_len, chunk->count);
+    gej_add(&q, &q, &extra);
+
+    /* Q must be lift_x(r_1): x = r_1 and y even */
+    secp256k1_ge q_aff;
+    if (!gej_to_ge_var(&q_aff, &q)) return 0;
+    if (!fe_equal(&q_aff.x, r1)) return 0;
+    return point_has_even_y(&q_aff.y);
+}
+
 int secp256k1c_schnorr_verify_batch(
     const uint8_t *pub32,
     const uint8_t *const *sigs64,
@@ -489,47 +537,19 @@ int secp256k1c_schnorr_verify_batch(
     secp256k1_scalar s_sum, e_sum;
     if (!batch_parse(&r1, &s_sum, &e_sum, sigs64[0], pub32, msgs[0], msg_lens[0])) return 0;
 
-    batch_chunk chunk;
-
-    /* Chunks after the first: extra = -sum a_i*R_i over them, each with its own Strauss loop */
-    secp256k1_gej extra;
-    gej_set_infinity(&extra);
-    for (size_t from = 1 + BATCH_CHUNK; from < count; from += BATCH_CHUNK) {
-        size_t to = from + BATCH_CHUNK < count ? from + BATCH_CHUNK : count;
-        if (!batch_prepare(&chunk, from, to, pub32, sigs64, msgs, msg_lens, seed, block,
-                           &block_index, &s_sum, &e_sum)) return 0;
-        secp256k1_gej acc;
-        gej_set_infinity(&acc);
-        for (int bit = chunk.max_len - 1; bit >= 0; bit--) {
-            gej_double(&acc, &acc);
-            for (int j = 0; j < chunk.count; j++) {
-                if (bit >= chunk.wnaf_len[j]) continue;
-                int d = chunk.wnaf[j][bit];
-                if (d == 0) continue;
-                secp256k1_ge pt = chunk.table[j * Q_TABLE_ENTRIES + (d > 0 ? d : -d) / 2];
-                if (d < 0) fe_negate(&pt.y, &pt.y, 1);
-                gej_add_ge(&acc, &acc, &pt);
-            }
+    /* The chunk's tables and digits (~56 KB) live on the heap: on the stack they overflowed small
+     * thread stacks (a batch of 8 crashed at 64 KB). Without memory, verify one by one. */
+    batch_chunk *chunk = (batch_chunk *)malloc(sizeof(batch_chunk));
+    if (!chunk) {
+        for (size_t i = 0; i < count; i++) {
+            if (!secp256k1c_schnorr_verify(sigs64[i], msgs[i], msg_lens[i], pub32)) return 0;
         }
-        gej_add(&extra, &extra, &acc);
+        return 1;
     }
-
-    /* The first chunk, inside the G and P loop: Q = s*G - e*P - sum a_i*R_i */
-    size_t first_to = 1 + BATCH_CHUNK < count ? 1 + BATCH_CHUNK : count;
-    if (!batch_prepare(&chunk, 1, first_to, pub32, sigs64, msgs, msg_lens, seed, block,
-                       &block_index, &s_sum, &e_sum)) return 0;
-    scalar_negate(&e_sum, &e_sum);
-    secp256k1_ge p_aff = {.x = px, .y = py};
-    secp256k1_gej q;
-    ecmult_double_g_multi(&q, &s_sum, &p_aff, &e_sum, chunk.table, &chunk.wnaf[0][0],
-                          BATCH_WNAF_MAX, chunk.wnaf_len, chunk.count);
-    gej_add(&q, &q, &extra);
-
-    /* Q must be lift_x(r_1): x = r_1 and y even */
-    secp256k1_ge q_aff;
-    if (!gej_to_ge_var(&q_aff, &q)) return 0;
-    if (!fe_equal(&q_aff.x, &r1)) return 0;
-    return point_has_even_y(&q_aff.y);
+    int ok = batch_finish(chunk, pub32, sigs64, msgs, msg_lens, count, seed, block, &block_index,
+                          &r1, s_sum, e_sum, &px, &py);
+    free(chunk);
+    return ok;
 }
 
 /* ==================== Tweak Operations ==================== */
