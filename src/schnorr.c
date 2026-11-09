@@ -500,7 +500,7 @@ static int batch_prepare(batch_chunk *c, size_t from, size_t to, const uint8_t *
         c->wnaf_len[j] = len;
         if (len > c->max_len) c->max_len = len;
     }
-    ecmult_odd_multiples_affine(c->table, c->r, c->count, c->scratch);
+    ecmult_odd_multiples_affine(c->table, c->r, c->count, Q_TABLE_ENTRIES, c->scratch);
     return 1;
 }
 

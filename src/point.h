@@ -72,10 +72,10 @@ void ecmult_double_g_multi(secp256k1_gej *r, const secp256k1_scalar *s,
                            const secp256k1_ge *q_tables, const int8_t *q_wnaf, int q_stride,
                            const int *q_len, int q_count);
 
-/* The affine odd multiples Q, 3Q, ..., (2*Q_TABLE_ENTRIES - 1)Q of each of count affine points, to
- * out[j*Q_TABLE_ENTRIES + k], with one inversion for all of them. jac is scratch for
- * count*Q_TABLE_ENTRIES points. Variable time: public points only. */
-void ecmult_odd_multiples_affine(secp256k1_ge *out, const secp256k1_ge *pts, int count,
+/* The affine odd multiples Q, 3Q, ..., (2T - 1)Q of each of count affine points, to out[j*T + k],
+ * normalized, with one inversion for all of them. jac is scratch for count*T points. Variable
+ * time: public points only. */
+void ecmult_odd_multiples_affine(secp256k1_ge *out, const secp256k1_ge *pts, int count, int T,
                                  secp256k1_gej *jac);
 
 /* ==================== Key/Point Codec ==================== */

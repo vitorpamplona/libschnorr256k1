@@ -107,24 +107,15 @@ static void p_tables(p_table_set *out, const secp256k1_ge *p, int *flip) {
         if (hit) return;
     }
 
-    secp256k1_gej pj, p2j;
-    gej_set_ge(&pj, p);
-    gej_double(&p2j, &pj);
-
-    secp256k1_gej p_odd_jac[P_TABLE_ENTRIES], p_lam_jac[P_TABLE_ENTRIES];
-    p_odd_jac[0] = pj;
-    for (int i = 1; i < P_TABLE_ENTRIES; i++) {
-        gej_add(&p_odd_jac[i], &p_odd_jac[i-1], &p2j);
-    }
+    /* P, 3P, ..., 15P with mixed additions and one inversion (ecmult_odd_multiples_affine), and
+     * lambda(kP) = (beta*x, y) from them: no second table, no second inversion. */
+    secp256k1_gej scratch[P_TABLE_ENTRIES];
+    ecmult_odd_multiples_affine(out->p_odd, p, 1, P_TABLE_ENTRIES, scratch);
     for (int i = 0; i < P_TABLE_ENTRIES; i++) {
-        fe_mul(&p_lam_jac[i].x, &p_odd_jac[i].x, &GLV_BETA);
-        p_lam_jac[i].y = p_odd_jac[i].y;
-        p_lam_jac[i].z = p_odd_jac[i].z;
-        p_lam_jac[i].infinity = 0;
+        fe_mul(&out->p_lam_odd[i].x, &out->p_odd[i].x, &GLV_BETA);
+        fe_normalize_full(&out->p_lam_odd[i].x);
+        out->p_lam_odd[i].y = out->p_odd[i].y;
     }
-
-    batch_to_affine(out->p_odd, p_odd_jac, P_TABLE_ENTRIES);
-    batch_to_affine(out->p_lam_odd, p_lam_jac, P_TABLE_ENTRIES);
     *flip = 0;
 
     if (slot_lock_acquire(&cached->lock)) {
@@ -159,193 +150,135 @@ int gej_is_infinity(const secp256k1_gej *r) {
 
 /* Point doubling: r = 2*p (3M + 4S) using a=0 formula from libsecp256k1 */
 void gej_double(secp256k1_gej *r, const secp256k1_gej *p) {
-    secp256k1_fe s, l, t, u;
-
-    /* Handle aliasing: if r == p, copy input first */
-    secp256k1_gej tmp;
-    if (r == p) {
-        tmp = *p;
-        p = &tmp;
-    }
-
+    /* Every coordinate goes to a local and r is written last, so r may be p (no copy). Lazy:
+     * the results are below 2^256, not normalized; everything downstream takes that. */
     if (p->infinity) {
         gej_set_infinity(r);
         return;
     }
+    secp256k1_fe s, l, l3, t, x3, u, s2, z3;
 
-    /* S = Y^2 */
-    fe_sqr(&s, &p->y);
-
-    /* L = (3/2) * X^2 */
+    fe_sqr(&s, &p->y);         /* S = Y^2 */
     fe_sqr(&l, &p->x);
-    secp256k1_fe l3;
     fe_add(&l3, &l, &l);
     fe_add(&l3, &l3, &l);
-    fe_half(&l, &l3);
+    fe_half(&l, &l3);          /* L = (3/2) X^2 */
+    fe_mul(&t, &p->x, &s);     /* T = X*S */
 
-    /* T = -X*S */
-    fe_mul(&t, &p->x, &s);
-    fe_negate(&t, &t, 1);
+    fe_sqr(&x3, &l);
+    fe_sub(&x3, &x3, &t);
+    fe_sub(&x3, &x3, &t);      /* X3 = L^2 - 2T */
 
-    /* X3 = L^2 + 2T */
-    fe_sqr(&r->x, &l);
-    fe_add_assign(&r->x, &t);
-    fe_add_assign(&r->x, &t);
-    fe_normalize(&r->x);
-
-    /* Y3 = -(L*(X3+T) + S^2) */
-    fe_add(&u, &r->x, &t);
+    fe_sub(&u, &t, &x3);
     fe_mul(&u, &l, &u);
-    secp256k1_fe s2;
-    fe_sqr(&s2, &s);
-    fe_add_assign(&u, &s2);
-    fe_negate(&r->y, &u, 2);
-    fe_normalize(&r->y);
+    fe_sqr(&s2, &s);           /* Y3 = L*(T - X3) - S^2 */
 
-    /* Z3 = Y*Z */
-    fe_mul(&r->z, &p->y, &p->z);
-    fe_normalize(&r->z);
+    fe_mul(&z3, &p->y, &p->z); /* Z3 = Y*Z */
 
+    r->x = x3;
+    fe_sub(&r->y, &u, &s2);
+    r->z = z3;
     r->infinity = 0;
 }
 
-/* Mixed addition: r = p + q where q is affine (Z=1). 8M + 3S.
- * Callers in the hot path (ecmult loops) always pass r != p.
- * The aliasing check is kept for safety in table-build code. */
+/* Mixed addition: r = p + q where q is affine (Z=1). 8M + 3S. r may be p. */
 void gej_add_ge(secp256k1_gej *r, const secp256k1_gej *p, const secp256k1_ge *q) {
-    secp256k1_gej _tmp;
-    if (__builtin_expect(r == p, 0)) { _tmp = *p; p = &_tmp; }
-    secp256k1_fe z12, z13, u2, s2, h, h2, i, j, rr, v, t;
-
+    /* r is written last, so r may be p (no copy). Lazy results, as gej_double. */
     if (p->infinity) {
         gej_set_ge(r, q);
         return;
     }
+    secp256k1_fe z12, z13, u2, s2, h, h2, i, j, rr, v, x3, y3, z3, t;
 
-    /* Z1^2, Z1^3 */
     fe_sqr(&z12, &p->z);
     fe_mul(&z13, &z12, &p->z);
+    fe_mul(&u2, &q->x, &z12);      /* U2 = qx*Z1^2 */
+    fe_mul(&s2, &q->y, &z13);      /* S2 = qy*Z1^3 */
 
-    /* U2 = qx * Z1^2, S2 = qy * Z1^3 */
-    fe_mul(&u2, &q->x, &z12);
-    fe_mul(&s2, &q->y, &z13);
-
-    /* H = U2 - X1 */
-    fe_negate(&t, &p->x, 1);
-    fe_add(&h, &u2, &t);
-
+    fe_sub(&h, &u2, &p->x);        /* H = U2 - X1 */
+    fe_sub(&rr, &s2, &p->y);       /* S2 - Y1 */
     if (fe_is_zero(&h)) {
-        fe_negate(&t, &p->y, 1);
-        fe_add(&t, &s2, &t);
-        if (fe_is_zero(&t)) { gej_double(r, p); }
+        if (fe_is_zero(&rr)) { gej_double(r, p); }
         else { gej_set_infinity(r); }
         return;
     }
 
     fe_add(&h2, &h, &h);
-    fe_sqr(&i, &h2);           /* I = (2H)² */
-    fe_mul(&j, &h, &i);        /* J = H*I */
-    fe_negate(&t, &p->y, 1);
-    fe_add(&rr, &s2, &t);
-    fe_add(&rr, &rr, &rr);     /* r = 2*(S2-Y1) */
-    fe_mul(&v, &p->x, &i);     /* V = X1*I */
+    fe_sqr(&i, &h2);               /* I = (2H)^2 */
+    fe_mul(&j, &h, &i);            /* J = H*I */
+    fe_add(&rr, &rr, &rr);         /* r = 2*(S2 - Y1) */
+    fe_mul(&v, &p->x, &i);         /* V = X1*I */
 
-    fe_sqr(&r->x, &rr);        /* X3 = r² */
-    fe_negate(&t, &j, 1);
-    fe_add_assign(&r->x, &t);
-    fe_negate(&t, &v, 1);
-    fe_add_assign(&r->x, &t);
-    fe_add_assign(&r->x, &t);
+    fe_sqr(&x3, &rr);
+    fe_sub(&x3, &x3, &j);
+    fe_sub(&x3, &x3, &v);
+    fe_sub(&x3, &x3, &v);          /* X3 = r^2 - J - 2V */
 
-    fe_negate(&t, &r->x, 5);
-    fe_add(&t, &v, &t);        /* V - X3 */
-    fe_mul(&r->y, &rr, &t);    /* r*(V-X3) */
+    fe_sub(&t, &v, &x3);
+    fe_mul(&y3, &rr, &t);
     fe_mul(&t, &p->y, &j);
     fe_add(&t, &t, &t);
-    fe_negate(&t, &t, 2);
-    fe_add_assign(&r->y, &t);  /* - 2*Y1*J */
+    fe_sub(&y3, &y3, &t);          /* Y3 = r*(V - X3) - 2*Y1*J */
 
-    fe_mul(&r->z, &p->z, &h);
-    fe_add(&r->z, &r->z, &r->z); /* Z3 = 2*Z1*H */
+    fe_mul(&z3, &p->z, &h);
+    fe_add(&z3, &z3, &z3);         /* Z3 = 2*Z1*H */
 
+    r->x = x3;
+    r->y = y3;
+    r->z = z3;
     r->infinity = 0;
 }
 
 /* Full Jacobian addition: r = p + q (11M + 5S) */
 void gej_add(secp256k1_gej *r, const secp256k1_gej *p, const secp256k1_gej *q) {
-    /* Handle aliasing */
-    secp256k1_gej tp, tq;
-    if (r == p) { tp = *p; p = &tp; }
-    if (r == q) { tq = *q; q = &tq; }
-    secp256k1_fe z12, z22, u1, u2, s1, s2, h, h2, i, j, rr, v, t;
-
+    /* r is written last, so r may be p or q (no copy). Lazy results, as gej_double. */
     if (p->infinity) { *r = *q; return; }
     if (q->infinity) { *r = *p; return; }
+    secp256k1_fe z12, z22, z13, z23, u1, u2, s1, s2, h, h2, i, j, rr, v, x3, y3, z3, t;
 
     fe_sqr(&z12, &p->z);
     fe_sqr(&z22, &q->z);
     fe_mul(&u1, &p->x, &z22);
     fe_mul(&u2, &q->x, &z12);
-
-    secp256k1_fe z23, z13;
     fe_mul(&z23, &z22, &q->z);
     fe_mul(&z13, &z12, &p->z);
     fe_mul(&s1, &p->y, &z23);
     fe_mul(&s2, &q->y, &z13);
 
-    fe_negate(&t, &u1, 1);
-    fe_add(&h, &u2, &t);
-    fe_normalize(&h);
-
+    fe_sub(&h, &u2, &u1);
+    fe_sub(&rr, &s2, &s1);
     if (fe_is_zero(&h)) {
-        fe_negate(&t, &s1, 1);
-        fe_add(&t, &s2, &t);
-        fe_normalize(&t);
-        if (fe_is_zero(&t)) {
-            gej_double(r, p);
-        } else {
-            gej_set_infinity(r);
-        }
+        if (fe_is_zero(&rr)) { gej_double(r, p); }
+        else { gej_set_infinity(r); }
         return;
     }
 
     fe_add(&h2, &h, &h);
-    fe_sqr(&i, &h2);
-    fe_mul(&j, &h, &i);
+    fe_sqr(&i, &h2);               /* I = (2H)^2 */
+    fe_mul(&j, &h, &i);            /* J = H*I */
+    fe_add(&rr, &rr, &rr);         /* r = 2*(S2 - S1) */
+    fe_mul(&v, &u1, &i);           /* V = U1*I */
 
-    fe_negate(&t, &s1, 1);
-    fe_add(&rr, &s2, &t);
-    fe_add(&rr, &rr, &rr);
-    fe_normalize(&rr);
+    fe_sqr(&x3, &rr);
+    fe_sub(&x3, &x3, &j);
+    fe_sub(&x3, &x3, &v);
+    fe_sub(&x3, &x3, &v);          /* X3 = r^2 - J - 2V */
 
-    fe_mul(&v, &u1, &i);
-
-    fe_sqr(&r->x, &rr);
-    fe_negate(&t, &j, 1);
-    fe_add_assign(&r->x, &t);
-    fe_negate(&t, &v, 1);
-    fe_add_assign(&r->x, &t);
-    fe_add_assign(&r->x, &t);
-    fe_normalize(&r->x);
-
-    fe_negate(&t, &r->x, 5);
-    fe_add(&t, &v, &t);
-    fe_mul(&r->y, &rr, &t);
+    fe_sub(&t, &v, &x3);
+    fe_mul(&y3, &rr, &t);
     fe_mul(&t, &s1, &j);
     fe_add(&t, &t, &t);
-    fe_negate(&t, &t, 2);
-    fe_add_assign(&r->y, &t);
-    fe_normalize(&r->y);
+    fe_sub(&y3, &y3, &t);          /* Y3 = r*(V - X3) - 2*S1*J */
 
-    fe_add(&r->z, &p->z, &q->z);
-    fe_sqr(&r->z, &r->z);
-    fe_negate(&t, &z12, 1);
-    fe_add_assign(&r->z, &t);
-    fe_negate(&t, &z22, 1);
-    fe_add_assign(&r->z, &t);
-    fe_mul(&r->z, &r->z, &h);
-    fe_normalize(&r->z);
+    fe_add(&z3, &p->z, &q->z);
+    fe_sqr(&z3, &z3);
+    fe_sub(&z3, &z3, &z12);
+    fe_sub(&z3, &z3, &z22);
+    fe_mul(&z3, &z3, &h);          /* Z3 = ((Z1 + Z2)^2 - Z1^2 - Z2^2)*H = 2*Z1*Z2*H */
 
+    r->x = x3;
+    r->y = y3;
+    r->z = z3;
     r->infinity = 0;
 }
 
@@ -530,9 +463,8 @@ void batch_to_affine(secp256k1_ge *out, const secp256k1_gej *in, int count) {
 
 /* ==================== Table Initialization ==================== */
 
-void ecmult_odd_multiples_affine(secp256k1_ge *out, const secp256k1_ge *pts, int count,
+void ecmult_odd_multiples_affine(secp256k1_ge *out, const secp256k1_ge *pts, int count, int T,
                                  secp256k1_gej *jac) {
-    const int T = Q_TABLE_ENTRIES;
     const int n = count * T;
     if (count <= 0) return;
 
@@ -559,7 +491,7 @@ void ecmult_odd_multiples_affine(secp256k1_ge *out, const secp256k1_ge *pts, int
 
     /* Montgomery's trick, the running products of the Z's kept in out[i].x until out[i] is
      * written (backwards, so out[i - 1].x still holds its product when out[i] needs it). Odd
-     * multiples kQ with k < 2*Q_TABLE_ENTRIES of a point of prime order n are never infinity. */
+     * multiples kQ with k < 2T of a point of prime order n are never infinity. */
     out[0].x = jac[0].z;
     for (int i = 1; i < n; i++) fe_mul(&out[i].x, &out[i - 1].x, &jac[i].z);
     secp256k1_fe inv, zi, zi2, zi3;
@@ -747,7 +679,6 @@ void ecmult(secp256k1_gej *r, const secp256k1_ge *p, const secp256k1_scalar *sca
             secp256k1_ge pt = p_odd[idx];
             if ((d < 0) ^ split.neg_k1) {
                 fe_negate(&pt.y, &pt.y, 1);
-                fe_normalize(&pt.y);
             }
             gej_add_ge(r, r, &pt);
         }
@@ -759,7 +690,6 @@ void ecmult(secp256k1_gej *r, const secp256k1_ge *p, const secp256k1_scalar *sca
             secp256k1_ge pt = p_lam_odd[idx];
             if ((d < 0) ^ split.neg_k2) {
                 fe_negate(&pt.y, &pt.y, 1);
-                fe_normalize(&pt.y);
             }
             gej_add_ge(r, r, &pt);
         }
@@ -832,7 +762,6 @@ void ecmult_double_g_multi(secp256k1_gej *r, const secp256k1_scalar *s_scalar,
             pt = g_odd[idx];
             if ((d < 0) ^ s_split.neg_k1) {
                 fe_negate(&pt.y, &pt.y, 1);
-                fe_normalize(&pt.y);
             }
             gej_add_ge(r, r, &pt);
         }
@@ -844,7 +773,6 @@ void ecmult_double_g_multi(secp256k1_gej *r, const secp256k1_scalar *s_scalar,
             pt = g_lam[idx];
             if ((d < 0) ^ s_split.neg_k2) {
                 fe_negate(&pt.y, &pt.y, 1);
-                fe_normalize(&pt.y);
             }
             gej_add_ge(r, r, &pt);
         }
@@ -856,7 +784,6 @@ void ecmult_double_g_multi(secp256k1_gej *r, const secp256k1_scalar *s_scalar,
             pt = p_odd[idx];
             if ((d < 0) ^ e_split.neg_k1) {
                 fe_negate(&pt.y, &pt.y, 1);
-                fe_normalize(&pt.y);
             }
             gej_add_ge(r, r, &pt);
         }
@@ -868,7 +795,6 @@ void ecmult_double_g_multi(secp256k1_gej *r, const secp256k1_scalar *s_scalar,
             pt = p_lam_odd[idx];
             if ((d < 0) ^ e_split.neg_k2) {
                 fe_negate(&pt.y, &pt.y, 1);
-                fe_normalize(&pt.y);
             }
             gej_add_ge(r, r, &pt);
         }

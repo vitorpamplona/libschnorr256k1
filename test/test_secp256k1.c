@@ -451,6 +451,47 @@ static void point_cache_keeps_y_parity(void) {
     }
 }
 
+/* A key's tables are built on its first use (ecmult_odd_multiples_affine) and copied from the
+ * cache after. Both must give the same answers, for keys of both parities and for verify, ECDH
+ * and tweak-mul alike, and tweak-mul must equal d*t*G computed with no table. */
+static void key_tables_agree_built_and_cached(void) {
+    HEX32(tweak, "67E56582298859DDAE725F972992A07C6C4FB9F62A8FFF58CE3CA926A1063530");
+    for (int k = 1; k <= 12; k++) {
+        uint8_t sec[32] = {0}, pub65[65], msg[32], sig[64], ecdh[3][32], tw[3][65];
+        sec[0] = 0x71; sec[31] = (uint8_t)k;
+        ASSERT_TRUE(secp256k1c_pubkey_create(pub65, sec));
+        memset(msg, k, 32);
+        ASSERT_TRUE(secp256k1c_schnorr_sign(sig, msg, 32, sec, NULL));
+        uint8_t bad[64];
+        memcpy(bad, sig, 64);
+        bad[63] ^= 1;
+        for (int round = 0; round < 3; round++) {
+            ASSERT_TRUE(secp256k1c_schnorr_verify(sig, msg, 32, pub65 + 1));
+            ASSERT_FALSE(secp256k1c_schnorr_verify(bad, msg, 32, pub65 + 1));
+        }
+        /* A fresh key for ECDH and tweak-mul (the verifies above cached the first one) */
+        sec[0] = 0x72;
+        ASSERT_TRUE(secp256k1c_pubkey_create(pub65, sec));
+        for (int round = 0; round < 3; round++) {
+            ASSERT_TRUE(secp256k1c_ecdh_xonly(ecdh[round], pub65 + 1, tweak));
+            ASSERT_TRUE(secp256k1c_pubkey_tweak_mul(tw[round], 65, pub65, 65, tweak));
+        }
+        ASSERT_MEM_EQ(ecdh[0], ecdh[1], 32);
+        ASSERT_MEM_EQ(ecdh[0], ecdh[2], 32);
+        ASSERT_MEM_EQ(tw[0], tw[1], 65);
+        ASSERT_MEM_EQ(tw[0], tw[2], 65);
+        /* tweak-mul against d*t*G computed without any table */
+        secp256k1_scalar d, t, dt;
+        uint8_t dtb[32], want[65];
+        scalar_from_bytes(&d, sec);
+        scalar_from_bytes(&t, tweak);
+        scalar_mul(&dt, &d, &t);
+        scalar_to_bytes(dtb, &dt);
+        ASSERT_TRUE(secp256k1c_pubkey_create(want, dtb));
+        ASSERT_MEM_EQ(tw[0], want, 65);
+    }
+}
+
 /* ==================== Tagged Hash ==================== */
 
 static void tagged_hash_consistency(void) {
@@ -508,6 +549,7 @@ void run_secp256k1_tests(void) {
     TEST(batch_sizes_and_single_errors);
     TEST(batch_rejects_bad_first_signature);
     TEST(point_cache_keeps_y_parity);
+    TEST(key_tables_agree_built_and_cached);
     /* Tagged hash */
     TEST(tagged_hash_consistency);
     printf("  secp256k1: done\n");

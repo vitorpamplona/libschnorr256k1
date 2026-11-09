@@ -357,27 +357,6 @@ int fe_sqrt(secp256k1_fe *r, const secp256k1_fe *a) {
 
 /* ==================== Half ==================== */
 
-void fe_half(secp256k1_fe *r, const secp256k1_fe *a) {
-    /* Branchless: mask = all-1s if odd, all-0s if even.
-     * Conditionally add P before shifting. Avoids normalization. */
-    uint64_t mask = -(a->d[0] & 1); /* 0xFFF...F if odd, 0 if even */
-    uint64_t p0 = 0xFFFFFFFEFFFFFC2FULL & mask;
-    /* P[1..3] = 0xFFFF...FFFF, so P[i] & mask = mask */
-
-    uint64_t s0 = a->d[0] + p0;
-    uint64_t c0 = (s0 < a->d[0]) ? 1ULL : 0ULL;
-    uint64_t s1 = a->d[1] + mask + c0;
-    uint64_t c1 = (s1 < a->d[1]) || (c0 && s1 == a->d[1]) ? 1ULL : 0ULL;
-    uint64_t s2 = a->d[2] + mask + c1;
-    uint64_t c2 = (s2 < a->d[2]) || (c1 && s2 == a->d[2]) ? 1ULL : 0ULL;
-    uint64_t s3 = a->d[3] + mask + c2;
-    uint64_t c3 = (s3 < a->d[3]) || (c2 && s3 == a->d[3]) ? 1ULL : 0ULL;
-
-    r->d[0] = (s0 >> 1) | (s1 << 63);
-    r->d[1] = (s1 >> 1) | (s2 << 63);
-    r->d[2] = (s2 >> 1) | (s3 << 63);
-    r->d[3] = (s3 >> 1) | (c3 << 63);
-}
 
 /* ==================== Serialization ==================== */
 
