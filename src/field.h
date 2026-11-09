@@ -12,6 +12,9 @@
 #define SECP256K1_FIELD_H
 
 #include "secp256k1_internal.h"
+#if SECP_X86_64 && (defined(__GNUC__) || defined(__clang__))
+#include <x86intrin.h>
+#endif
 
 /* ==================== Field Element (4x64-bit limbs, little-endian) ==================== */
 
@@ -96,12 +99,26 @@ static inline void fe_normalize_full(secp256k1_fe *a) {
     fe_normalize(a);
 }
 
-/* r = a + b.
- * LAZY: does NOT normalize. Result may be in [0, 2^256 + C).
+/* r = a + b mod p, for any a, b in [0, 2^256).
+ * LAZY: does NOT normalize. The result is in [0, 2^256), possibly >= p.
  * fe_mul/fe_sqr handle unnormalized inputs via their reduction.
  * Call fe_normalize() explicitly before comparisons or serialization. */
 static inline void fe_add(secp256k1_fe *r, const secp256k1_fe *a, const secp256k1_fe *b) {
-#if HAVE_INT128
+#if SECP_X86_64 && (defined(__GNUC__) || defined(__clang__))
+    /* The same chain as the __int128 one below, through the carry flag: GCC compiles the u128
+     * form to ~65 instructions with spills (verify 3 us slower), this to an add/adc chain. */
+    unsigned long long r0, r1, r2, r3;
+    unsigned char c = _addcarry_u64(0, a->d[0], b->d[0], &r0);
+    c = _addcarry_u64(c, a->d[1], b->d[1], &r1);
+    c = _addcarry_u64(c, a->d[2], b->d[2], &r2);
+    c = _addcarry_u64(c, a->d[3], b->d[3], &r3);
+    c = _addcarry_u64(0, r0, 0x1000003D1ULL & (0 - (unsigned long long)c), &r0);
+    c = _addcarry_u64(c, r1, 0, &r1);
+    c = _addcarry_u64(c, r2, 0, &r2);
+    c = _addcarry_u64(c, r3, 0, &r3);
+    r0 += 0x1000003D1ULL & (0 - (unsigned long long)c);
+    r->d[0] = r0; r->d[1] = r1; r->d[2] = r2; r->d[3] = r3;
+#elif HAVE_INT128
     /* One add-with-carry chain, then the carry out of 2^256 folded back as C = 2^256 mod p,
      * branch-free. The fold can carry out again only when a + b >= 2^257 - C (both inputs
      * unreduced, in [p, 2^256)); what is left is then below C, so a second C cannot carry. */
@@ -165,7 +182,7 @@ static inline void fe_add_assign(secp256k1_fe *r, const secp256k1_fe *a) {
  * p - a in one borrow chain (p's upper three limbs are all ones, so limb i is ~a_i minus the
  * borrow). When a > p (an unreduced value, in (p, 2^256)) the chain borrows out and holds
  * 2^256 + p - a; subtracting C = 2^256 - p gives 2p - a, which is -a mod p. Branch-free, no
- * normalization: the result is in [0, p], and p (for a = 0 or a = p) is the unreduced zero,
+ * normalization: the result is in [0, p], and p (for a = 0) is the unreduced zero,
  * which fe_mul, fe_add and every comparison helper already take. */
 static inline void fe_negate(secp256k1_fe *r, const secp256k1_fe *a, int m) {
     (void)m;
