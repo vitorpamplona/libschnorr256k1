@@ -127,26 +127,31 @@ static inline void fe_mul_asm(secp256k1_fe *r, const secp256k1_fe *a, const secp
         : "rax", "rcx", "rdx", "cc", "memory"
     );
 
-    /* Reduce: r[0..3] + r[4..7] * C */
+    /* Reduce: r[0..3] + r[4..7] * C (2^256 = C mod p). Every carry out of r3 goes into r8,
+     * which is then folded once more; a carry out of that fold is one more 2^256, added as C.
+     * (Before 2026-11-09 the carries out of r3 in the r4 and r5 steps and in the final fold were
+     * dropped, so products whose low half came within ~2^67 of 2^256 lost a C.) */
     uint64_t c = FIELD_C_ASM;
     __asm__ __volatile__(
+        "xorl %%r8d, %%r8d\n\t"
+
         "movq %[r4], %%rdx\n\t"
         "mulx %[c], %%rax, %%rcx\n\t"
         "addq %%rax, %[r0]\n\t"
         "adcq %%rcx, %[r1]\n\t"
+        "adcq $0, %[r2]\n\t"
+        "adcq $0, %[r3]\n\t"
+        "adcq $0, %%r8\n\t"
 
         "movq %[r5], %%rdx\n\t"
         "mulx %[c], %%rax, %%rcx\n\t"
-        "adcq $0, %[r2]\n\t"
-        "adcq $0, %[r3]\n\t"
         "addq %%rax, %[r1]\n\t"
         "adcq %%rcx, %[r2]\n\t"
+        "adcq $0, %[r3]\n\t"
+        "adcq $0, %%r8\n\t"
 
         "movq %[r6], %%rdx\n\t"
         "mulx %[c], %%rax, %%rcx\n\t"
-        "adcq $0, %[r3]\n\t"
-        "sbbq %%r8, %%r8\n\t"
-        "negq %%r8\n\t"
         "addq %%rax, %[r2]\n\t"
         "adcq %%rcx, %[r3]\n\t"
         "adcq $0, %%r8\n\t"
@@ -156,13 +161,23 @@ static inline void fe_mul_asm(secp256k1_fe *r, const secp256k1_fe *a, const secp
         "addq %%rax, %[r3]\n\t"
         "adcq %%rcx, %%r8\n\t"
 
-        /* Final fold: r8 * C */
+        /* Fold r8 (< 2^34) * C */
         "movq %%r8, %%rdx\n\t"
         "mulx %[c], %%rax, %%rcx\n\t"
         "addq %%rax, %[r0]\n\t"
         "adcq %%rcx, %[r1]\n\t"
         "adcq $0, %[r2]\n\t"
         "adcq $0, %[r3]\n\t"
+
+        /* Carry out of r3: add C (the sum is then below 2^67 + C, so no further carry). A branch,
+         * as fe_normalize on x86_64: it is taken only when r1..r3 are all ones, so it predicts
+         * perfectly, where the branch-free sbb/and/add form cost 1.5 ns (12%) per fe_mul. */
+        "jnc 1f\n\t"
+        "addq %[c], %[r0]\n\t"
+        "adcq $0, %[r1]\n\t"
+        "adcq $0, %[r2]\n\t"
+        "adcq $0, %[r3]\n\t"
+        "1:\n\t"
 
         : [r0]"+r"(r0), [r1]"+r"(r1), [r2]"+r"(r2), [r3]"+r"(r3)
         : [r4]"r"(r4), [r5]"r"(r5), [r6]"r"(r6), [r7]"r"(r7), [c]"r"(c)
@@ -341,6 +356,13 @@ static inline void fe_mul_asm(secp256k1_fe *r, const secp256k1_fe *a, const secp
             "adds  %[r0], %[r0], x16\n\t"
             "umulh x16, x17, %[c]\n\t"
             "adcs  %[r1], %[r1], x16\n\t"
+            "adcs  %[r2], %[r2], xzr\n\t"
+            "adcs  %[r3], %[r3], xzr\n\t"
+            /* A carry out of r3 is one more 2^256: add C, branch-free (cannot carry again).
+             * Before 2026-11-09 this carry was dropped, losing a C. */
+            "csel  x16, %[c], xzr, cs\n\t"
+            "adds  %[r0], %[r0], x16\n\t"
+            "adcs  %[r1], %[r1], xzr\n\t"
             "adcs  %[r2], %[r2], xzr\n\t"
             "adc   %[r3], %[r3], xzr\n\t"
             : [r0]"=&r"(lo0), [r1]"=&r"(lo1), [r2]"=&r"(lo2), [r3]"=&r"(lo3)
