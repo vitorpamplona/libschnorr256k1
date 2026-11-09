@@ -404,6 +404,53 @@ static void batch_rejects_bad_first_signature(void) {
     }
 }
 
+/* KI-3 (libschnorr256k1-bench): the point-table cache was keyed by x alone, and a point and its
+ * negation share an x. A tweak-mul of an odd-y key cached tables that verify then used for the
+ * key's even-y x-only form (rejecting valid signatures), and after a verify the tweak-mul of
+ * the odd-y point came out negated. Both orders, against d*t*G computed without the cache. */
+static void point_cache_keeps_y_parity(void) {
+    uint8_t sec[32] = {0}, pub65[65];
+    for (uint8_t i = 1;; i++) { /* a key with odd y */
+        sec[0] = 0x5A; sec[31] = i;
+        ASSERT_TRUE(secp256k1c_pubkey_create(pub65, sec));
+        if (pub65[64] & 1) break;
+    }
+    HEX32(tweak, "3982F19BEF1615BCCFBB05E321C10E1D4CBA3DF0E841C2E41EEB6016347653C3");
+
+    /* d*t*G, the expected tweak-mul of the odd-y point d*G */
+    secp256k1_scalar d, t, dt;
+    scalar_from_bytes(&d, sec);
+    scalar_from_bytes(&t, tweak);
+    scalar_mul(&dt, &d, &t);
+    uint8_t dt_bytes[32], want65[65];
+    scalar_to_bytes(dt_bytes, &dt);
+    ASSERT_TRUE(secp256k1c_pubkey_create(want65, dt_bytes));
+
+    uint8_t msg[32], sig[64], got65[65], pub33[33];
+    memset(msg, 0x33, 32);
+    ASSERT_TRUE(secp256k1c_schnorr_sign(sig, msg, 32, sec, NULL));
+    pub33[0] = 0x03;
+    memcpy(pub33 + 1, pub65 + 1, 32);
+
+    for (int round = 0; round < 2; round++) {
+        /* Tweak-mul first (caches the odd-y point), then verify (the even-y lift of its x) */
+        ASSERT_TRUE(secp256k1c_pubkey_tweak_mul(got65, 65, pub65, 65, tweak));
+        ASSERT_MEM_EQ(got65, want65, 65);
+        ASSERT_TRUE(secp256k1c_schnorr_verify(sig, msg, 32, pub65 + 1));
+        ASSERT_TRUE(secp256k1c_schnorr_verify_fast(sig, msg, 32, pub65 + 1));
+        const uint8_t *sp[2] = {sig, sig}, *mp[2] = {msg, msg};
+        size_t lens[2] = {32, 32};
+        ASSERT_TRUE(secp256k1c_schnorr_verify_batch(pub65 + 1, sp, mp, lens, 2));
+        /* And back: the tweak-mul after the verify, from the 65- and the 33-byte forms */
+        ASSERT_TRUE(secp256k1c_pubkey_tweak_mul(got65, 65, pub65, 65, tweak));
+        ASSERT_MEM_EQ(got65, want65, 65);
+        uint8_t got33[33];
+        ASSERT_TRUE(secp256k1c_pubkey_tweak_mul(got33, 33, pub33, 33, tweak));
+        ASSERT_EQ_INT(got33[0], 0x02 | (want65[64] & 1));
+        ASSERT_MEM_EQ(got33 + 1, want65 + 1, 32);
+    }
+}
+
 /* ==================== Tagged Hash ==================== */
 
 static void tagged_hash_consistency(void) {
@@ -460,6 +507,7 @@ void run_secp256k1_tests(void) {
     TEST(batch_rejects_cancelling_signatures);
     TEST(batch_sizes_and_single_errors);
     TEST(batch_rejects_bad_first_signature);
+    TEST(point_cache_keeps_y_parity);
     /* Tagged hash */
     TEST(tagged_hash_consistency);
     printf("  secp256k1: done\n");

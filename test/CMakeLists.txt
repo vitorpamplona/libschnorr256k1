@@ -20,4 +20,12 @@ if(UNIX)
     target_link_libraries(schnorr256k1_tests PRIVATE m)
 endif()
 
+# The shared caches under concurrent use, where threads exist.
+find_package(Threads)
+if(Threads_FOUND AND CMAKE_USE_PTHREADS_INIT)
+    target_sources(schnorr256k1_tests PRIVATE test_threads.c)
+    target_compile_definitions(schnorr256k1_tests PRIVATE SCHNORR256K1_TEST_THREADS=1)
+    target_link_libraries(schnorr256k1_tests PRIVATE Threads::Threads)
+endif()
+
 add_test(NAME secp256k1_tests COMMAND schnorr256k1_tests)

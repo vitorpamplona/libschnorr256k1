@@ -50,8 +50,9 @@ int gej_to_ge_x(secp256k1_fe *rx, const secp256k1_gej *p);
 /* G multiplication using comb method: out = scalar * G */
 void ecmult_gen(secp256k1_gej *r, const secp256k1_scalar *scalar);
 
-/* Arbitrary point multiplication using GLV + wNAF: out = scalar * p */
-void ecmult(secp256k1_gej *r, const secp256k1_gej *p, const secp256k1_scalar *scalar);
+/* Arbitrary point multiplication using GLV + wNAF: out = scalar * p, p affine (its tables are
+ * cached by x and y parity, shared with ecmult_double_g). Variable time. */
+void ecmult(secp256k1_gej *r, const secp256k1_ge *p, const secp256k1_scalar *scalar);
 
 /* Dual scalar multiplication (Strauss + GLV): out = s*G + e*P */
 void ecmult_double_g(secp256k1_gej *r, const secp256k1_scalar *s,
