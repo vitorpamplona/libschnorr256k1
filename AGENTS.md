@@ -40,7 +40,7 @@ Do not replace these with simpler alternatives without benchmarking proof.
 mkdir build && cd build
 cmake ..
 make
-./test/schnorr256k1_tests    # Expect: ALL 103 TESTS PASSED
+./test/schnorr256k1_tests    # Expect: ALL 117 TESTS PASSED
 ctest                         # Expect: 100% tests passed
 ./bench/secp256k1_bench       # Benchmark all operations
 ```

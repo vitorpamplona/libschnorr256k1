@@ -12,6 +12,9 @@
 #define SECP256K1_FIELD_H
 
 #include "secp256k1_internal.h"
+#if SECP_X86_64 && (defined(__GNUC__) || defined(__clang__))
+#include <x86intrin.h>
+#endif
 
 /* ==================== Field Element (4x64-bit limbs, little-endian) ==================== */
 
@@ -96,11 +99,46 @@ static inline void fe_normalize_full(secp256k1_fe *a) {
     fe_normalize(a);
 }
 
-/* r = a + b.
- * LAZY: does NOT normalize. Result may be in [0, 2^256 + C).
+/* r = a + b mod p, for any a, b in [0, 2^256).
+ * LAZY: does NOT normalize. The result is in [0, 2^256), possibly >= p.
  * fe_mul/fe_sqr handle unnormalized inputs via their reduction.
  * Call fe_normalize() explicitly before comparisons or serialization. */
 static inline void fe_add(secp256k1_fe *r, const secp256k1_fe *a, const secp256k1_fe *b) {
+#if SECP_X86_64 && (defined(__GNUC__) || defined(__clang__))
+    /* The same chain as the __int128 one below, through the carry flag: GCC compiles the u128
+     * form to ~65 instructions with spills (verify 3 us slower), this to an add/adc chain. */
+    unsigned long long r0, r1, r2, r3;
+    unsigned char c = _addcarry_u64(0, a->d[0], b->d[0], &r0);
+    c = _addcarry_u64(c, a->d[1], b->d[1], &r1);
+    c = _addcarry_u64(c, a->d[2], b->d[2], &r2);
+    c = _addcarry_u64(c, a->d[3], b->d[3], &r3);
+    c = _addcarry_u64(0, r0, 0x1000003D1ULL & (0 - (unsigned long long)c), &r0);
+    c = _addcarry_u64(c, r1, 0, &r1);
+    c = _addcarry_u64(c, r2, 0, &r2);
+    c = _addcarry_u64(c, r3, 0, &r3);
+    r0 += 0x1000003D1ULL & (0 - (unsigned long long)c);
+    r->d[0] = r0; r->d[1] = r1; r->d[2] = r2; r->d[3] = r3;
+#elif HAVE_INT128
+    /* One add-with-carry chain, then the carry out of 2^256 folded back as C = 2^256 mod p,
+     * branch-free. The fold can carry out again only when a + b >= 2^257 - C (both inputs
+     * unreduced, in [p, 2^256)); what is left is then below C, so a second C cannot carry. */
+    typedef unsigned __int128 u128;
+    u128 t = (u128)a->d[0] + b->d[0];
+    uint64_t r0 = (uint64_t)t;
+    t = (t >> 64) + a->d[1] + b->d[1];
+    uint64_t r1 = (uint64_t)t;
+    t = (t >> 64) + a->d[2] + b->d[2];
+    uint64_t r2 = (uint64_t)t;
+    t = (t >> 64) + a->d[3] + b->d[3];
+    uint64_t r3 = (uint64_t)t;
+    t = (u128)r0 + (0x1000003D1ULL & (0 - (uint64_t)(t >> 64)));
+    r0 = (uint64_t)t;
+    t = (t >> 64) + r1; r1 = (uint64_t)t;
+    t = (t >> 64) + r2; r2 = (uint64_t)t;
+    t = (t >> 64) + r3; r3 = (uint64_t)t;
+    r0 += 0x1000003D1ULL & (0 - (uint64_t)(t >> 64));
+    r->d[0] = r0; r->d[1] = r1; r->d[2] = r2; r->d[3] = r3;
+#else
     uint64_t carry = 0;
     for (int i = 0; i < 4; i++) {
         uint64_t sum = a->d[i] + b->d[i] + carry;
@@ -112,13 +150,25 @@ static inline void fe_add(secp256k1_fe *r, const secp256k1_fe *a, const secp256k
         uint64_t s = r->d[0] + 0x1000003D1ULL;
         uint64_t c = (s < r->d[0]) ? 1 : 0;
         r->d[0] = s;
-        if (c) { r->d[1]++; if (!r->d[1]) { r->d[2]++; if (!r->d[2]) r->d[3]++; } }
+        if (c) {
+            r->d[1]++;
+            if (!r->d[1]) {
+                r->d[2]++;
+                if (!r->d[2]) {
+                    r->d[3]++;
+                    /* a + b >= 2^257 - C (both inputs in [p, 2^256)): the fold carried out
+                     * of 2^256 again. What is left is below C, so one more C cannot carry. */
+                    if (!r->d[3]) r->d[0] += 0x1000003D1ULL;
+                }
+            }
+        }
     }
     /* No normalize — result may be in [P, 2^256). This is fine because:
      * - fe_mul/fe_sqr reduce any 256-bit input correctly
-     * - fe_negate uses 2P - a which handles values up to 2P
+     * - fe_negate takes any value below 2^256
      * - fe_half handles values up to 2P
      * Only fe_is_zero, fe_cmp, fe_to_bytes need explicit normalize first. */
+#endif
 }
 
 /* r += a (lazy, no normalize) */
@@ -127,24 +177,29 @@ static inline void fe_add_assign(secp256k1_fe *r, const secp256k1_fe *a) {
     fe_add(r, &t, a);
 }
 
-/* r = -a mod p.
+/* r = -a mod p, for any a in [0, 2^256).
  *
- * Normalizes a first (fast — usually a no-op), then computes P - a. When
- * a == 0, P - 0 = P, which a final fe_normalize collapses back to 0. This
- * branch-free form matches the Kotlin FieldP.neg path and avoids the
- * data-dependent early-return the previous version had. */
+ * p - a in one borrow chain (p's upper three limbs are all ones, so limb i is ~a_i minus the
+ * borrow). When a > p (an unreduced value, in (p, 2^256)) the chain borrows out and holds
+ * 2^256 + p - a; subtracting C = 2^256 - p gives 2p - a, which is -a mod p. Branch-free, no
+ * normalization: the result is in [0, p], and p (for a = 0) is the unreduced zero,
+ * which fe_mul, fe_add and every comparison helper already take. */
 static inline void fe_negate(secp256k1_fe *r, const secp256k1_fe *a, int m) {
     (void)m;
-    secp256k1_fe t = *a;
-    fe_normalize(&t);
-    uint64_t borrow = 0;
-    for (int i = 0; i < 4; i++) {
-        uint64_t diff = FE_P.d[i] - t.d[i] - borrow;
-        borrow = (FE_P.d[i] < t.d[i] + borrow) || (borrow && t.d[i] == UINT64_MAX) ? 1 : 0;
-        r->d[i] = diff;
-    }
-    /* If a was 0, r is now P; fold back to 0. Normal inputs leave r < P. */
-    fe_normalize(r);
+    const uint64_t a0 = a->d[0], a1 = a->d[1], a2 = a->d[2], a3 = a->d[3];
+    uint64_t r0 = FE_P0 - a0;
+    uint64_t b = a0 > FE_P0;
+    uint64_t r1 = ~a1 - b; b &= (a1 == UINT64_MAX);
+    uint64_t r2 = ~a2 - b; b &= (a2 == UINT64_MAX);
+    uint64_t r3 = ~a3 - b; b &= (a3 == UINT64_MAX);
+    /* b = 1 only when a > p: subtract C. r >= p + 1 > C then, so the chain cannot borrow out. */
+    const uint64_t c = 0x1000003D1ULL & (0 - b);
+    uint64_t bb = r0 < c;
+    r0 -= c;
+    r1 -= bb; bb &= (r1 == UINT64_MAX);
+    r2 -= bb; bb &= (r2 == UINT64_MAX);
+    r3 -= bb;
+    r->d[0] = r0; r->d[1] = r1; r->d[2] = r2; r->d[3] = r3;
 }
 
 /* ==================== Function declarations ==================== */

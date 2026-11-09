@@ -447,6 +447,77 @@ static void mul_random_values_match_ref(void) {
     }
 }
 
+/* a mod p, for any 4x64 value (reduced or in [p, 2^256)). */
+static void fe_reduce_ref(secp256k1_fe *r, const secp256k1_fe *a) {
+    secp256k1_fe one;
+    fe_set4(&one, 0, 0, 0, 1);
+    fe_mul_ref(r, a, &one);
+}
+
+/* fe_negate: -a mod p for every representable a, and the result a valid element (<= p). */
+static int neg_matches_ref(const secp256k1_fe *a) {
+    secp256k1_fe got, ar, sum, sumr, zero;
+    fe_negate(&got, a, 1);
+    if (fe_cmp(&got, &FE_P) > 0) return 0;
+    fe_reduce_ref(&ar, a);
+    fe_reduce_ref(&sumr, &got);
+    /* (a mod p) + (-a mod p) is 0 or p */
+    fe_add(&sum, &ar, &sumr);
+    fe_set4(&zero, 0, 0, 0, 0);
+    fe_reduce_ref(&sum, &sum);
+    return fe_equal(&sum, &zero);
+}
+
+/* fe_add: (a + b) mod p for every pair of representable values. */
+static int add_matches_ref(const secp256k1_fe *a, const secp256k1_fe *b) {
+    typedef unsigned __int128 u128;
+    secp256k1_fe got, want, gotr;
+    fe_add(&got, a, b);
+    /* want = ((a mod p) + (b mod p)) mod p, without fe_add */
+    secp256k1_fe ar, br;
+    fe_reduce_ref(&ar, a);
+    fe_reduce_ref(&br, b);
+    u128 acc = 0;
+    for (int k = 0; k < 4; k++) {
+        acc += (u128)ar.d[k] + br.d[k];
+        want.d[k] = (uint64_t)acc;
+        acc >>= 64;
+    }
+    if (acc) { /* 2^256 = C mod p; the sum is below 2p, so no second carry */
+        acc = (u128)want.d[0] + REF_C;
+        want.d[0] = (uint64_t)acc; acc >>= 64;
+        for (int k = 1; k < 4 && acc; k++) { acc += want.d[k]; want.d[k] = (uint64_t)acc; acc >>= 64; }
+    }
+    fe_reduce_ref(&want, &want);
+    fe_reduce_ref(&gotr, &got);
+    return fe_equal(&gotr, &want);
+}
+
+static void neg_add_edge_values_match_ref(void) {
+    secp256k1_fe v[32];
+    int n = edge_values(v);
+    for (int i = 0; i < n; i++) {
+        ASSERT_TRUE(neg_matches_ref(&v[i]));
+        for (int j = 0; j < n; j++) ASSERT_TRUE(add_matches_ref(&v[i], &v[j]));
+    }
+}
+
+static void neg_add_random_values_match_ref(void) {
+    uint64_t s = 0x9E3779B97F4A7C15ULL;
+    for (int n = 0; n < 200000; n++) {
+        secp256k1_fe a, b;
+        for (int k = 0; k < 4; k++) { a.d[k] = xs64(&s); b.d[k] = xs64(&s); }
+        switch (n % 4) {
+        case 0: a.d[1] = a.d[2] = a.d[3] = UINT64_MAX; break;
+        case 1: a.d[1] = a.d[2] = a.d[3] = b.d[1] = b.d[2] = b.d[3] = UINT64_MAX; break;
+        case 2: a.d[1] = a.d[2] = a.d[3] = UINT64_MAX; a.d[0] |= 0xFFFFFFFEFFFFFC2FULL; break;
+        default: break;
+        }
+        ASSERT_TRUE(neg_matches_ref(&a));
+        ASSERT_TRUE(add_matches_ref(&a, &b));
+    }
+}
+
 /* ==================== Runner ==================== */
 
 void run_field_tests(void) {
@@ -464,6 +535,8 @@ void run_field_tests(void) {
     /* Negation */
     TEST(neg_twice_is_identity);
     TEST(add_neg_is_zero);
+    TEST(neg_add_edge_values_match_ref);
+    TEST(neg_add_random_values_match_ref);
     /* Multiplication */
     TEST(mul_commutative);
     TEST(sqr_matches_mul);
