@@ -39,7 +39,9 @@ extern "C" {
 
 /* ==================== Initialization ==================== */
 
-/* Initialize the library (precompute tables). Thread-safe, idempotent. */
+/* Initialize the library (precompute tables). Call it before any other function. Thread-safe and
+ * idempotent: the first call builds the tables, calls on other threads meanwhile wait for it,
+ * and later calls return at once. */
 void secp256k1c_init(void);
 
 /* ==================== Key Operations ==================== */

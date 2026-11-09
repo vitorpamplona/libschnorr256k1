@@ -123,7 +123,7 @@ cd build
 ctest
 ```
 
-The test suite includes 116 tests across 7 files:
+The test suite includes 117 tests across 7 files:
 
 | File | Tests | Coverage |
 |------|-------|----------|
@@ -133,7 +133,7 @@ The test suite includes 116 tests across 7 files:
 | `test_point.c` | 14 | EC point doubling, addition, scalar multiplication |
 | `test_key_codec.c` | 14 | Key parsing and validation, serialization, liftX |
 | `test_sha256.c` | 8 | SHA-256 KATs, tagged hash consistency |
-| `test_threads.c` | 2 | The shared caches under concurrent verifies (built where pthreads exist) |
+| `test_threads.c` | 3 | The shared caches and init under concurrent verifies (built where pthreads exist) |
 
 All BIP-340 test vectors come from the
 [official BIP-340 spec](https://github.com/bitcoin/bips/blob/master/bip-0340/test-vectors.csv).
@@ -218,7 +218,7 @@ libschnorr256k1/
 │   ├── schnorr.c              # BIP-340, key ops, ECDH, SHA wrappers
 │   ├── sha256.c / sha256.h    # SHA-256 + tagged hashes
 │   └── sha256_hw.h            # HW-accelerated SHA-256
-├── test/                      # 116 tests
+├── test/                      # 117 tests
 ├── bench/                     # Standalone benchmark
 ├── scripts/                   # Android NDK build script
 ├── CMakeLists.txt

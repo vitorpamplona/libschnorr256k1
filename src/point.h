@@ -100,7 +100,7 @@ int point_has_even_y(const secp256k1_fe *y);
 /* Batch convert array of Jacobian points to affine using Montgomery's trick */
 void batch_to_affine(secp256k1_ge *out, const secp256k1_gej *in, int count);
 
-/* Initialize precomputed tables (called by secp256k1c_init) */
+/* Build the precomputed tables. Not idempotent nor thread-safe: only secp256k1c_init, once. */
 void ecmult_tables_init(void);
 
 #endif /* SECP256K1_POINT_H */

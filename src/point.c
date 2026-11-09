@@ -43,7 +43,6 @@ static const secp256k1_fe FE_SEVEN = {{7, 0, 0, 0}};
 static secp256k1_ge comb_table[COMB_TABLE_SIZE];
 static secp256k1_ge g_odd_table[G_TABLE_SIZE];
 static secp256k1_ge g_lam_table[G_TABLE_SIZE];
-static int tables_initialized = 0;
 
 /* ==================== P-side wNAF Table Cache ==================== */
 /*
@@ -652,11 +651,10 @@ static void build_comb_table(void) {
     free(tooth_g);
 }
 
+/* Called once, by secp256k1c_init. */
 void ecmult_tables_init(void) {
-    if (tables_initialized) return;
     build_g_odd_table();
     build_comb_table();
-    tables_initialized = 1;
 }
 
 /* ==================== Scalar Multiplication ==================== */

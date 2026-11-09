@@ -18,10 +18,9 @@ static uint8_t CHALLENGE_PREFIX[64];
 static uint8_t AUX_PREFIX[64];
 static uint8_t NONCE_PREFIX[64];
 static uint8_t BATCH_PREFIX[64];
-static int prefixes_initialized = 0;
 
+/* Called once, by secp256k1c_init. */
 static void init_prefixes(void) {
-    if (prefixes_initialized) return;
     uint8_t tag_hash[32];
 
     secp256k1_sha256_hash(tag_hash, (const uint8_t *)"BIP0340/challenge", 17);
@@ -39,8 +38,6 @@ static void init_prefixes(void) {
     secp256k1_sha256_hash(tag_hash, (const uint8_t *)"BIP0340/batch", 13);
     memcpy(BATCH_PREFIX, tag_hash, 32);
     memcpy(BATCH_PREFIX + 32, tag_hash, 32);
-
-    prefixes_initialized = 1;
 }
 
 /* ==================== Pubkey Decompression Cache ==================== */
@@ -95,10 +92,24 @@ static int lift_x_cached(secp256k1_fe *out_x, secp256k1_fe *out_y, const uint8_t
 
 /* ==================== Library Init ==================== */
 
+/* 0: not started, 1: a thread is building the tables, 2: done. */
+static unsigned char init_state;
+
+/* Once per process, from any number of threads: the first caller builds the tables and the
+ * tag prefixes, any caller meanwhile waits for it (a few milliseconds, once), and every later
+ * call is one atomic load. It used to rebuild on concurrent first calls and zero the key cache
+ * on every call, under the feet of threads verifying with it. */
 void secp256k1c_init(void) {
-    ecmult_tables_init();
-    init_prefixes();
-    memset(pubkey_cache, 0, sizeof(pubkey_cache));
+    if (__atomic_load_n(&init_state, __ATOMIC_ACQUIRE) == 2) return;
+    unsigned char expected = 0;
+    if (__atomic_compare_exchange_n(&init_state, &expected, 1, 0, __ATOMIC_ACQ_REL,
+                                    __ATOMIC_ACQUIRE)) {
+        ecmult_tables_init();
+        init_prefixes();
+        __atomic_store_n(&init_state, 2, __ATOMIC_RELEASE);
+        return;
+    }
+    while (__atomic_load_n(&init_state, __ATOMIC_ACQUIRE) != 2) slot_lock_pause();
 }
 
 /* ==================== Key Operations ==================== */
