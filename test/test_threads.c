@@ -97,6 +97,26 @@ static void run_pair(int same_table) {
     ASSERT_EQ_INT(a.wrong + b.wrong, 0);
 }
 
+static volatile int init_stop;
+
+static void *init_loop(void *arg) {
+    (void)arg;
+    while (!init_stop) secp256k1c_init();
+    return NULL;
+}
+
+/* secp256k1c_init is idempotent: calling it again while other threads verify changes nothing.
+ * (It zeroed the key cache, locks included, on every call.) */
+static void init_while_verifying(void) {
+    pthread_t t;
+    init_stop = 0;
+    ASSERT_TRUE(pthread_create(&t, NULL, init_loop, NULL) == 0);
+    run_pair(0);
+    run_pair(1);
+    init_stop = 1;
+    pthread_join(t, NULL);
+}
+
 static void table_cache_is_thread_safe(void) { run_pair(1); }
 static void key_cache_is_thread_safe(void) { run_pair(0); }
 
@@ -105,5 +125,6 @@ void run_thread_tests(void) {
     printf("Running thread-safety tests...\n");
     TEST(table_cache_is_thread_safe);
     TEST(key_cache_is_thread_safe);
+    TEST(init_while_verifying);
     printf("  Threads: done\n");
 }
