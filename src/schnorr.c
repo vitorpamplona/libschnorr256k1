@@ -452,9 +452,8 @@ int secp256k1c_pubkey_tweak_mul(uint8_t *result, size_t result_len,
     scalar_from_bytes(&scalar, tweak32);
     if (!scalar_is_valid(&scalar)) return 0;
 
-    secp256k1_gej pj, rj;
-    gej_set_ge(&pj, &p);
-    ecmult(&rj, &pj, &scalar);
+    secp256k1_gej rj;
+    ecmult(&rj, &p, &scalar);
 
     secp256k1_ge r;
     if (!gej_to_ge(&r, &rj)) return 0;
@@ -478,9 +477,9 @@ int secp256k1c_ecdh_xonly(uint8_t *result32, const uint8_t *xonly_pub32, const u
     scalar_from_bytes(&k, scalar32);
     if (!scalar_is_valid(&k)) return 0;
 
-    secp256k1_gej pj, rj;
-    gej_set_ge(&pj, &(secp256k1_ge){.x = px, .y = py});
-    ecmult(&rj, &pj, &k);
+    secp256k1_gej rj;
+    const secp256k1_ge p = {.x = px, .y = py};
+    ecmult(&rj, &p, &k);
 
     secp256k1_fe rx;
     if (!gej_to_ge_x(&rx, &rj)) return 0;
