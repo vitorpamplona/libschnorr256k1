@@ -107,24 +107,15 @@ static void p_tables(p_table_set *out, const secp256k1_ge *p, int *flip) {
         if (hit) return;
     }
 
-    secp256k1_gej pj, p2j;
-    gej_set_ge(&pj, p);
-    gej_double(&p2j, &pj);
-
-    secp256k1_gej p_odd_jac[P_TABLE_ENTRIES], p_lam_jac[P_TABLE_ENTRIES];
-    p_odd_jac[0] = pj;
-    for (int i = 1; i < P_TABLE_ENTRIES; i++) {
-        gej_add(&p_odd_jac[i], &p_odd_jac[i-1], &p2j);
-    }
+    /* P, 3P, ..., 15P with mixed additions and one inversion (ecmult_odd_multiples_affine), and
+     * lambda(kP) = (beta*x, y) from them: no second table, no second inversion. */
+    secp256k1_gej scratch[P_TABLE_ENTRIES];
+    ecmult_odd_multiples_affine(out->p_odd, p, 1, P_TABLE_ENTRIES, scratch);
     for (int i = 0; i < P_TABLE_ENTRIES; i++) {
-        fe_mul(&p_lam_jac[i].x, &p_odd_jac[i].x, &GLV_BETA);
-        p_lam_jac[i].y = p_odd_jac[i].y;
-        p_lam_jac[i].z = p_odd_jac[i].z;
-        p_lam_jac[i].infinity = 0;
+        fe_mul(&out->p_lam_odd[i].x, &out->p_odd[i].x, &GLV_BETA);
+        fe_normalize_full(&out->p_lam_odd[i].x);
+        out->p_lam_odd[i].y = out->p_odd[i].y;
     }
-
-    batch_to_affine(out->p_odd, p_odd_jac, P_TABLE_ENTRIES);
-    batch_to_affine(out->p_lam_odd, p_lam_jac, P_TABLE_ENTRIES);
     *flip = 0;
 
     if (slot_lock_acquire(&cached->lock)) {
@@ -472,9 +463,8 @@ void batch_to_affine(secp256k1_ge *out, const secp256k1_gej *in, int count) {
 
 /* ==================== Table Initialization ==================== */
 
-void ecmult_odd_multiples_affine(secp256k1_ge *out, const secp256k1_ge *pts, int count,
+void ecmult_odd_multiples_affine(secp256k1_ge *out, const secp256k1_ge *pts, int count, int T,
                                  secp256k1_gej *jac) {
-    const int T = Q_TABLE_ENTRIES;
     const int n = count * T;
     if (count <= 0) return;
 
@@ -501,7 +491,7 @@ void ecmult_odd_multiples_affine(secp256k1_ge *out, const secp256k1_ge *pts, int
 
     /* Montgomery's trick, the running products of the Z's kept in out[i].x until out[i] is
      * written (backwards, so out[i - 1].x still holds its product when out[i] needs it). Odd
-     * multiples kQ with k < 2*Q_TABLE_ENTRIES of a point of prime order n are never infinity. */
+     * multiples kQ with k < 2T of a point of prime order n are never infinity. */
     out[0].x = jac[0].z;
     for (int i = 1; i < n; i++) fe_mul(&out[i].x, &out[i - 1].x, &jac[i].z);
     secp256k1_fe inv, zi, zi2, zi3;
