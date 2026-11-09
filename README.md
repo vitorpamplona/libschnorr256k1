@@ -198,9 +198,9 @@ timing, ensuring both are doing the same cryptographic work.
 | Fast verify (Nostr mode) | libschnorr256k1 faster — skips y-parity inversion |
 | Cached pubkey sign | libschnorr256k1 faster — avoids re-deriving the public key |
 
-The batch verification advantage is the killer feature for Nostr relays
-processing feeds from the same author: at batch size 200, the per-signature
-cost can be 10-13x lower than individual verification.
+The batch verification advantage matters for Nostr relays and clients
+processing feeds from the same author: from batch size 32 up, the
+per-signature cost is about a third of an individual verification.
 
 ## Project Structure
 
@@ -259,17 +259,26 @@ Signatures cross-verified between libraries before timing.
 
 ### Batch Verification (same pubkey)
 
-libsecp256k1 has no same-pubkey batch API, so its column shows N individual
-`schnorrsig_verify` calls. libschnorr256k1 uses randomized linear combination.
+libsecp256k1 has no same-pubkey batch API: it verifies N signatures with N
+`schnorrsig_verify` calls. libschnorr256k1 checks BIP-340's batch equation, with a
+128-bit weight per signature derived from all of the inputs, so invalid signatures
+cannot cancel each other out. Per signature, each batch of different signatures by
+one key, on a 4-vCPU x86_64 cloud VM (a shared machine), where a single verification
+of the same signatures takes 36 µs:
 
-| Batch size | libsecp256k1 (µs/sig) | libschnorr256k1 (µs/sig) | Speedup |
-|-----------:|----------------------:|--------------------------:|--------:|
-| 4 | 37.5 | 13.4 | 2.80x |
-| 8 | 37.5 | 9.6 | 3.89x |
-| 16 | 39.0 | 7.6 | 5.15x |
-| 32 | 37.9 | 6.7 | 5.65x |
-| 64 | 39.2 | 6.0 | 6.53x |
-| 200 | 39.1 | 5.7 | 6.88x |
+| Batch size | libschnorr256k1 (µs/sig) |
+|-----------:|--------------------------:|
+| 2 | 23.9 |
+| 4 | 17.6 |
+| 8 | 14.7 |
+| 16 | 13.1 |
+| 32 | 12.3 |
+| 64 | 12.3 |
+| 200 | 12.3 |
+
+Each signature after the first costs a square root (to lift its R), a table of its
+odd multiples and about 25 point additions; the doublings, the G and P terms and one
+inversion per 64 signatures are shared by the batch.
 
 ### Nostr-Specific Advantages
 
