@@ -264,6 +264,123 @@ static void mul_roundtrip_via_inv(void) {
     ASSERT_TRUE(fe_equal(&lazy_big, &back));
 }
 
+/* ==================== fe_mul / fe_sqr against a reference ==================== */
+
+/* A slow reference that shares nothing with field.c: the full 512-bit product, then
+ * lo + hi * C (2^256 = C mod p) folded until the high part is zero, then p subtracted
+ * until the value is below p. */
+#define REF_C 0x1000003D1ULL
+static void fe_mul_ref(secp256k1_fe *r, const secp256k1_fe *a, const secp256k1_fe *b) {
+    typedef unsigned __int128 u128;
+    uint64_t w[8] = {0};
+    for (int i = 0; i < 4; i++) {
+        uint64_t carry = 0;
+        for (int j = 0; j < 4; j++) {
+            u128 t = (u128)a->d[i] * b->d[j] + w[i + j] + carry;
+            w[i + j] = (uint64_t)t;
+            carry = (uint64_t)(t >> 64);
+        }
+        w[i + 4] = carry;
+    }
+    uint64_t lo[4] = {w[0], w[1], w[2], w[3]}, hi[4] = {w[4], w[5], w[6], w[7]};
+    for (;;) {
+        u128 acc = 0;
+        uint64_t t[5];
+        for (int k = 0; k < 4; k++) {
+            acc += (u128)lo[k] + (u128)hi[k] * REF_C;
+            t[k] = (uint64_t)acc;
+            acc >>= 64;
+        }
+        t[4] = (uint64_t)acc;
+        for (int k = 0; k < 4; k++) lo[k] = t[k];
+        hi[0] = t[4]; hi[1] = hi[2] = hi[3] = 0;
+        if (t[4] == 0) break;
+    }
+    for (;;) { /* while lo >= p: lo -= p */
+        int ge = lo[3] == UINT64_MAX && lo[2] == UINT64_MAX && lo[1] == UINT64_MAX &&
+                 lo[0] >= 0xFFFFFFFEFFFFFC2FULL;
+        if (!ge) break;
+        lo[0] -= 0xFFFFFFFEFFFFFC2FULL; lo[1] = lo[2] = lo[3] = 0;
+    }
+    for (int k = 0; k < 4; k++) r->d[k] = lo[k];
+}
+
+static int mul_matches_ref(const secp256k1_fe *a, const secp256k1_fe *b) {
+    secp256k1_fe got, want;
+    fe_mul(&got, a, b);
+    fe_normalize_full(&got);
+    fe_mul_ref(&want, a, b);
+    return fe_equal(&got, &want);
+}
+
+static int sqr_matches_ref(const secp256k1_fe *a) {
+    secp256k1_fe got, want;
+    fe_sqr(&got, a);
+    fe_normalize_full(&got);
+    fe_mul_ref(&want, a, a);
+    return fe_equal(&got, &want);
+}
+
+static void fe_set4(secp256k1_fe *r, uint64_t d3, uint64_t d2, uint64_t d1, uint64_t d0) {
+    r->d[0] = d0; r->d[1] = d1; r->d[2] = d2; r->d[3] = d3;
+}
+
+/* Values at the edges of the 4x64 representation, reduced and unreduced (fe_add may leave a
+ * result in [p, 2^256), and fe_mul must take it). */
+static int edge_values(secp256k1_fe *v) {
+    const uint64_t M = UINT64_MAX, P0 = 0xFFFFFFFEFFFFFC2FULL;
+    int n = 0;
+    fe_set4(&v[n++], 0, 0, 0, 0);
+    fe_set4(&v[n++], 0, 0, 0, 1);
+    fe_set4(&v[n++], 0, 0, 0, 2);
+    fe_set4(&v[n++], 0, 0, 0, REF_C - 1);
+    fe_set4(&v[n++], 0, 0, 0, REF_C);
+    fe_set4(&v[n++], M, M, M, P0 - 2);      /* p - 2 */
+    fe_set4(&v[n++], M, M, M, P0 - 1);      /* p - 1 */
+    fe_set4(&v[n++], M, M, M, P0);          /* p (unreduced 0) */
+    fe_set4(&v[n++], M, M, M, P0 + 1);      /* p + 1 */
+    fe_set4(&v[n++], M, M, M, M - 0x1000);  /* just below 2^256 */
+    fe_set4(&v[n++], M, M, M, M - 1);
+    fe_set4(&v[n++], M, M, M, M);           /* 2^256 - 1 */
+    fe_set4(&v[n++], 1ULL << 63, 0, 0, 0);  /* 2^255 */
+    fe_set4(&v[n++], M, M, 0, 0);
+    fe_set4(&v[n++], M, 0, 0, M);
+    fe_set4(&v[n++], 0, M, M, M);
+    fe_set4(&v[n++], M, M, M, 0);
+    return n;
+}
+
+static void mul_edge_values_match_ref(void) {
+    secp256k1_fe v[32];
+    int n = edge_values(v);
+    for (int i = 0; i < n; i++) {
+        ASSERT_TRUE(sqr_matches_ref(&v[i]));
+        for (int j = 0; j < n; j++) ASSERT_TRUE(mul_matches_ref(&v[i], &v[j]));
+    }
+}
+
+static uint64_t xs64(uint64_t *s) {
+    *s ^= *s >> 12; *s ^= *s << 25; *s ^= *s >> 27;
+    return *s * 0x2545F4914F6CDD1DULL;
+}
+
+/* Random inputs near 2^256 (top limbs all ones), in [p, 2^256), and anywhere. */
+static void mul_random_values_match_ref(void) {
+    uint64_t s = 0xD1B54A32D192ED03ULL;
+    for (int n = 0; n < 200000; n++) {
+        secp256k1_fe a, b;
+        for (int k = 0; k < 4; k++) { a.d[k] = xs64(&s); b.d[k] = xs64(&s); }
+        switch (n % 4) {
+        case 0: a.d[1] = a.d[2] = a.d[3] = UINT64_MAX; break;                        /* a near 2^256 */
+        case 1: a.d[1] = a.d[2] = a.d[3] = b.d[1] = b.d[2] = b.d[3] = UINT64_MAX; break;
+        case 2: a.d[1] = a.d[2] = a.d[3] = UINT64_MAX; a.d[0] |= 0xFFFFFFFEFFFFFC2FULL; break; /* >= p */
+        default: break;
+        }
+        ASSERT_TRUE(mul_matches_ref(&a, &b));
+        ASSERT_TRUE(sqr_matches_ref(&a));
+    }
+}
+
 /* ==================== Runner ==================== */
 
 void run_field_tests(void) {
@@ -285,6 +402,8 @@ void run_field_tests(void) {
     TEST(mul_commutative);
     TEST(sqr_matches_mul);
     TEST(mul_distributive);
+    TEST(mul_edge_values_match_ref);
+    TEST(mul_random_values_match_ref);
     /* Inversion */
     TEST(inv_mul_is_one);
     TEST(inv_of_one);
