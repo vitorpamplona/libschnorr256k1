@@ -124,13 +124,13 @@ cd build
 ctest
 ```
 
-The test suite includes 117 tests across 7 files:
+The test suite includes 125 tests across 7 files:
 
 | File | Tests | Coverage |
 |------|-------|----------|
-| `test_schnorr.c` | 22 | Full BIP-340 test vectors (0-18), sign/verify round-trip |
-| `test_secp256k1.c` | 27 | Key ops, ECDH symmetry, batch verify, point-cache parity, tagged hash |
-| `test_field.c` | 29 | Field arithmetic mod p, carry-fold regression |
+| `test_schnorr.c` | 27 | Full BIP-340 test vectors (0-18), sign/verify round-trip, signing entry points |
+| `test_secp256k1.c` | 28 | Key ops, ECDH symmetry, batch verify, point tables built and cached, tagged hash |
+| `test_field.c` | 31 | Field arithmetic mod p against a reference, carry-fold regression |
 | `test_point.c` | 14 | EC point doubling, addition, scalar multiplication |
 | `test_key_codec.c` | 14 | Key parsing and validation, serialization, liftX |
 | `test_sha256.c` | 8 | SHA-256 KATs, tagged hash consistency |
@@ -219,7 +219,7 @@ libschnorr256k1/
 │   ├── schnorr.c              # BIP-340, key ops, ECDH, SHA wrappers
 │   ├── sha256.c / sha256.h    # SHA-256 + tagged hashes
 │   └── sha256_hw.h            # HW-accelerated SHA-256
-├── test/                      # 117 tests
+├── test/                      # 125 tests
 ├── bench/                     # Standalone benchmark
 ├── scripts/                   # Android NDK build script
 ├── CMakeLists.txt
