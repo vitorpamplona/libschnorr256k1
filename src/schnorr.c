@@ -165,16 +165,22 @@ static int schnorr_sign_internal(
     }
     scalar_to_bytes(d_bytes, &d);
 
-    /* Compute t = d XOR H(aux) */
+    /* t = d XOR H_aux(aux). No aux (NULL) is 32 zero bytes, as BIP-340 and libsecp256k1 have
+     * it: their H_aux is the constant ZERO_MASK, so a deterministic signature is the same bytes
+     * as theirs. (It used to skip the XOR, t = d: valid signatures, other bytes.) */
+    static const uint8_t ZERO_MASK[32] = {
+        0x54, 0xf1, 0x69, 0xcf, 0xc9, 0xe2, 0xe5, 0x72, 0x74, 0x80, 0x44, 0x1f, 0x90, 0xba, 0x25, 0xc4,
+        0x88, 0xf4, 0x61, 0xc7, 0x0b, 0x5e, 0xa5, 0xdc, 0xaa, 0xf7, 0xaf, 0x69, 0x27, 0x0a, 0xa5, 0x14
+    };
     uint8_t t_bytes[32];
+    uint8_t aux_hash[32];
     if (auxrand32) {
-        uint8_t aux_hash[32];
         secp256k1_tagged_hash_precomputed(aux_hash, AUX_PREFIX, auxrand32, 32);
-        for (int i = 0; i < 32; i++) {
-            t_bytes[i] = d_bytes[i] ^ aux_hash[i];
-        }
     } else {
-        memcpy(t_bytes, d_bytes, 32);
+        memcpy(aux_hash, ZERO_MASK, 32);
+    }
+    for (int i = 0; i < 32; i++) {
+        t_bytes[i] = d_bytes[i] ^ aux_hash[i];
     }
 
     /* Nonce: k0 = H(t || pub || msg) */

@@ -19,6 +19,28 @@ static void bip340_vector0_sign(void) {
         "25f66a4a85ea8b71e482a74f382d2ce5ebeee8fdb2172f477df4900d310536c0", 64);
 }
 
+/* No aux (NULL) is 32 zero bytes, as in BIP-340 and libsecp256k1: vector 0 (whose aux is zero)
+ * again with NULL, and NULL against zeros for keys of both parities. */
+static void null_aux_is_zero_aux(void) {
+    HEX32(msg, "0000000000000000000000000000000000000000000000000000000000000000");
+    HEX32(sec, "0000000000000000000000000000000000000000000000000000000000000003");
+    uint8_t sig[64];
+    ASSERT_TRUE(secp256k1c_schnorr_sign(sig, msg, 32, sec, NULL));
+    ASSERT_HEX_EQ(sig,
+        "e907831f80848d1069a5371b402410364bdf1c5f8307b0084c55f1ce2dca8215"
+        "25f66a4a85ea8b71e482a74f382d2ce5ebeee8fdb2172f477df4900d310536c0", 64);
+
+    uint8_t zeros[32] = {0}, k[32] = {0}, pub65[65], a[64], b[64];
+    for (int i = 1; i <= 8; i++) {
+        k[0] = 0x42; k[31] = (uint8_t)i;
+        ASSERT_TRUE(secp256k1c_pubkey_create(pub65, k));
+        ASSERT_TRUE(secp256k1c_schnorr_sign(a, msg, 32, k, NULL));
+        ASSERT_TRUE(secp256k1c_schnorr_sign(b, msg, 32, k, zeros));
+        ASSERT_MEM_EQ(a, b, 64);
+        ASSERT_TRUE(secp256k1c_schnorr_verify(a, msg, 32, pub65 + 1));
+    }
+}
+
 static void bip340_vector1_sign(void) {
     HEX32(msg, "243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89");
     HEX32(sec, "B7E151628AED2A6ABF7158809CF4F3C762E7160F38B4DA56A784D9045190CFEF");
@@ -294,6 +316,7 @@ void run_schnorr_tests(void) {
     printf("Running Schnorr tests...\n");
     /* Signing */
     TEST(bip340_vector0_sign);
+    TEST(null_aux_is_zero_aux);
     TEST(bip340_vector1_sign);
     TEST(bip340_vector2_sign);
     TEST(bip340_vector3_sign);

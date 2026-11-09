@@ -62,7 +62,7 @@ int secp256k1c_seckey_verify(const uint8_t *seckey32);
 
 /* Sign a message using BIP-340 Schnorr.
  * msg can be any length (BIP-340 specifies 32 bytes for standard use).
- * auxrand32 may be NULL for deterministic signing.
+ * auxrand32 may be NULL for deterministic signing: the same as 32 zero bytes (BIP-340, libsecp256k1).
  * Returns 1 on success, 0 on failure. */
 int secp256k1c_schnorr_sign(
     uint8_t *sig64,
