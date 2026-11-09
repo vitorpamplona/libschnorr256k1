@@ -138,6 +138,25 @@ static void parse_rejects_invalid_points(void) {
     ASSERT_FALSE(point_parse_pubkey(&dummy, one65, 65));
 }
 
+/* Valid points whose y is small, so y^2 and x^3 + 7 are small mod p: the on-curve check must
+ * compare them reduced (libschnorr256k1-kotlin's 65-byte parser rejected these). */
+static void parse_accepts_small_y_points(void) {
+    static const char *KEYS[4] = {
+        "041fe1e5ef3fceb5c135ab7741333ce5a6e80d68167653f6b2b24bcbcfaaaff5070000000000000000000000000000000000000000000000000000000000000001",
+        "04c8b492e17665b9e65e4a124661e1103f1aebfcc849dcd94f7688dcf149f6f4f20000000000000000000000000000000000000000000000000000000000000006",
+        "04a95c7e1d4c5db1863b7c6fb26ac231479ff552c18707b69a9ac6bf9c3676f31b000000000000000000000000000000000000000000000000000000000000000b",
+        "04c2b84dcef67220199a187064a65579cad41a3345bcf6974fe3a153128b81ca10000000000000000000000000000000000000000000000000000000000000000d",
+    };
+    for (int i = 0; i < 4; i++) {
+        uint8_t key[65], c33[33];
+        hex_to_bytes(key, KEYS[i], 65);
+        secp256k1_ge pt;
+        ASSERT_TRUE(point_parse_pubkey(&pt, key, 65));
+        ASSERT_TRUE(secp256k1c_pubkey_compress(c33, key));
+        ASSERT_TRUE(point_parse_pubkey(&pt, c33, 33));
+    }
+}
+
 /* ==================== Round-trips ==================== */
 
 static void compress_decompress_roundtrip(void) {
@@ -183,6 +202,7 @@ void run_key_codec_tests(void) {
     TEST(parse_invalid_sizes);
     TEST(parse_invalid_prefix);
     TEST(parse_rejects_invalid_points);
+    TEST(parse_accepts_small_y_points);
     /* Round-trips */
     TEST(compress_decompress_roundtrip);
     TEST(uncompressed_roundtrip);
