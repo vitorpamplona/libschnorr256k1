@@ -229,10 +229,9 @@ int secp256k1c_schnorr_sign(
 }
 
 /*
- * Fast signing with pre-computed x-only pubkey.
- * ASSUMES the private key already produces an even-y pubkey (BIP-340 convention).
- * This is the case for Nostr keys managed by KeyPair, which pre-negates if needed.
- * For arbitrary keys, use secp256k1c_schnorr_sign which derives y-parity.
+ * Signing with the x-only pubkey supplied. It still derives d*G, for the y parity BIP-340 needs
+ * (and returns 0 if the x is not seckey32's), so it costs what secp256k1c_schnorr_sign does;
+ * secp256k1c_schnorr_sign_with_pubkey takes the parity from a compressed key and skips it.
  */
 int secp256k1c_schnorr_sign_xonly(
     uint8_t *sig64,
