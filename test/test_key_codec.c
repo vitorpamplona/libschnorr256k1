@@ -102,17 +102,59 @@ static void parse_invalid_prefix(void) {
     ASSERT_FALSE(point_parse_pubkey(&dummy, buf65, 65));
 }
 
-static void parse_uncompressed_accepts_any_bytes(void) {
-    /* The uncompressed parser trusts the caller — it does NOT validate
-     * that (x, y) is on the curve.  This is by design: the public API
-     * (secp256k1c_pubkey_create / compress) always produces valid points,
-     * and skipping the on-curve check avoids an expensive sqrt. */
+/* Keys off the curve or with a coordinate >= p are rejected: an off-curve point used to reach
+ * the shared table cache under a real key's x, and invalid-curve points leak secret tweaks. */
+static void parse_rejects_invalid_points(void) {
     secp256k1_ge dummy;
     uint8_t fake[65] = {0};
     fake[0] = 0x04;
     fake[1] = 0x01;
     fake[33] = 0x01;
-    ASSERT_TRUE(point_parse_pubkey(&dummy, fake, 65));
+    ASSERT_FALSE(point_parse_pubkey(&dummy, fake, 65)); /* (1, 1): off the curve */
+
+    uint8_t g65[65];
+    point_serialize_uncompressed(g65, &SECP256K1_G);
+    ASSERT_TRUE(point_parse_pubkey(&dummy, g65, 65));
+    g65[64] ^= 0x02; /* G's x with another y */
+    ASSERT_FALSE(point_parse_pubkey(&dummy, g65, 65));
+    g65[64] ^= 0x02;
+
+    /* x = p + 1, congruent to 1, which is on the curve (8 is a square mod p): only the range
+     * check rejects it, in both encodings */
+    static const uint8_t P_PLUS_1[32] = {
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFE,0xFF,0xFF,0xFC,0x30};
+    uint8_t one33[33] = {0x02};
+    one33[32] = 1;
+    secp256k1_ge one;
+    ASSERT_TRUE(point_parse_pubkey(&one, one33, 33));
+    uint8_t c33[33] = {0x02};
+    memcpy(c33 + 1, P_PLUS_1, 32);
+    ASSERT_FALSE(point_parse_pubkey(&dummy, c33, 33));
+    uint8_t one65[65];
+    point_serialize_uncompressed(one65, &one);
+    ASSERT_TRUE(point_parse_pubkey(&dummy, one65, 65));
+    memcpy(one65 + 1, P_PLUS_1, 32);
+    ASSERT_FALSE(point_parse_pubkey(&dummy, one65, 65));
+}
+
+/* Valid points whose y is small, so y^2 and x^3 + 7 are small mod p: the on-curve check must
+ * compare them reduced (libschnorr256k1-kotlin's 65-byte parser rejected these). */
+static void parse_accepts_small_y_points(void) {
+    static const char *KEYS[4] = {
+        "041fe1e5ef3fceb5c135ab7741333ce5a6e80d68167653f6b2b24bcbcfaaaff5070000000000000000000000000000000000000000000000000000000000000001",
+        "04c8b492e17665b9e65e4a124661e1103f1aebfcc849dcd94f7688dcf149f6f4f20000000000000000000000000000000000000000000000000000000000000006",
+        "04a95c7e1d4c5db1863b7c6fb26ac231479ff552c18707b69a9ac6bf9c3676f31b000000000000000000000000000000000000000000000000000000000000000b",
+        "04c2b84dcef67220199a187064a65579cad41a3345bcf6974fe3a153128b81ca10000000000000000000000000000000000000000000000000000000000000000d",
+    };
+    for (int i = 0; i < 4; i++) {
+        uint8_t key[65], c33[33];
+        hex_to_bytes(key, KEYS[i], 65);
+        secp256k1_ge pt;
+        ASSERT_TRUE(point_parse_pubkey(&pt, key, 65));
+        ASSERT_TRUE(secp256k1c_pubkey_compress(c33, key));
+        ASSERT_TRUE(point_parse_pubkey(&pt, c33, 33));
+    }
 }
 
 /* ==================== Round-trips ==================== */
@@ -159,7 +201,8 @@ void run_key_codec_tests(void) {
     TEST(parse_uncompressed);
     TEST(parse_invalid_sizes);
     TEST(parse_invalid_prefix);
-    TEST(parse_uncompressed_accepts_any_bytes);
+    TEST(parse_rejects_invalid_points);
+    TEST(parse_accepts_small_y_points);
     /* Round-trips */
     TEST(compress_decompress_roundtrip);
     TEST(uncompressed_roundtrip);

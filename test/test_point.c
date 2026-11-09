@@ -167,9 +167,8 @@ static void mul_g_matches_mul(void) {
     secp256k1_gej g_result;
     ecmult_gen(&g_result, &k);
 
-    secp256k1_gej g_jac, m_result;
-    gej_set_ge(&g_jac, &SECP256K1_G);
-    ecmult(&m_result, &g_jac, &k);
+    secp256k1_gej m_result;
+    ecmult(&m_result, &SECP256K1_G, &k);
 
     ASSERT_TRUE(affine_xy_eq(&g_result, &m_result));
 }
@@ -198,9 +197,7 @@ static void mul_double_g_separate_vs_combined(void) {
     /* Separate: s*G + e*P */
     secp256k1_gej sG, eP, sep;
     ecmult_gen(&sG, &s);
-    secp256k1_gej p_jac2;
-    gej_set_ge(&p_jac2, &p_ge);
-    ecmult(&eP, &p_jac2, &e);
+    ecmult(&eP, &p_ge, &e);
     gej_add(&sep, &sG, &eP);
 
     ASSERT_TRUE(affine_xy_eq(&combined, &sep));

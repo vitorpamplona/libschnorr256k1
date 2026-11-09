@@ -40,6 +40,9 @@ static void init_prefixes(void) {
 
 /* ==================== Pubkey Decompression Cache ==================== */
 
+/* x-only key -> its even-y point. Shared by threads: each slot's lock is held only to copy an
+ * entry in or out (see slot_lock), so a reader never pairs one key's bytes with another's
+ * point. */
 #define PUBKEY_CACHE_SIZE 1024
 #define PUBKEY_CACHE_MASK (PUBKEY_CACHE_SIZE - 1)
 
@@ -48,6 +51,7 @@ typedef struct {
     secp256k1_fe px;
     secp256k1_fe py;
     int valid;
+    slot_lock lock;
 } cached_pubkey;
 
 static cached_pubkey pubkey_cache[PUBKEY_CACHE_SIZE];
@@ -57,23 +61,30 @@ static int cache_slot(const uint8_t *pub32) {
 }
 
 static int lift_x_cached(secp256k1_fe *out_x, secp256k1_fe *out_y, const uint8_t *pub32) {
-    int slot = cache_slot(pub32);
-    cached_pubkey *c = &pubkey_cache[slot];
+    cached_pubkey *c = &pubkey_cache[cache_slot(pub32)];
 
-    if (c->valid && memcmp(c->key_bytes, pub32, 32) == 0) {
-        *out_x = c->px;
-        *out_y = c->py;
-        return 1;
+    if (slot_lock_acquire(&c->lock)) {
+        int hit = c->valid && memcmp(c->key_bytes, pub32, 32) == 0;
+        if (hit) {
+            *out_x = c->px;
+            *out_y = c->py;
+        }
+        slot_lock_release(&c->lock);
+        if (hit) return 1;
     }
 
     secp256k1_fe x;
     fe_from_bytes(&x, pub32);
+    if (fe_cmp(&x, &FE_P) >= 0) return 0;
     if (!point_lift_x(out_x, out_y, &x)) return 0;
 
-    memcpy(c->key_bytes, pub32, 32);
-    c->px = *out_x;
-    c->py = *out_y;
-    c->valid = 1;
+    if (slot_lock_acquire(&c->lock)) {
+        memcpy(c->key_bytes, pub32, 32);
+        c->px = *out_x;
+        c->py = *out_y;
+        c->valid = 1;
+        slot_lock_release(&c->lock);
+    }
     return 1;
 }
 
@@ -103,7 +114,8 @@ int secp256k1c_pubkey_create(uint8_t *pub65, const uint8_t *seckey32) {
 }
 
 int secp256k1c_pubkey_compress(uint8_t *pub33, const uint8_t *pub65) {
-    if (pub65[0] != 0x04) return 0;
+    secp256k1_ge p;
+    if (!point_parse_pubkey(&p, pub65, 65)) return 0; /* 04, coordinates < p, on the curve */
     pub33[0] = (pub65[64] & 1) ? 0x03 : 0x02;
     memcpy(pub33 + 1, pub65 + 1, 32);
     return 1;
@@ -452,9 +464,8 @@ int secp256k1c_pubkey_tweak_mul(uint8_t *result, size_t result_len,
     scalar_from_bytes(&scalar, tweak32);
     if (!scalar_is_valid(&scalar)) return 0;
 
-    secp256k1_gej pj, rj;
-    gej_set_ge(&pj, &p);
-    ecmult(&rj, &pj, &scalar);
+    secp256k1_gej rj;
+    ecmult(&rj, &p, &scalar);
 
     secp256k1_ge r;
     if (!gej_to_ge(&r, &rj)) return 0;
@@ -478,9 +489,9 @@ int secp256k1c_ecdh_xonly(uint8_t *result32, const uint8_t *xonly_pub32, const u
     scalar_from_bytes(&k, scalar32);
     if (!scalar_is_valid(&k)) return 0;
 
-    secp256k1_gej pj, rj;
-    gej_set_ge(&pj, &(secp256k1_ge){.x = px, .y = py});
-    ecmult(&rj, &pj, &k);
+    secp256k1_gej rj;
+    const secp256k1_ge p = {.x = px, .y = py};
+    ecmult(&rj, &p, &k);
 
     secp256k1_fe rx;
     if (!gej_to_ge_x(&rx, &rj)) return 0;
