@@ -166,7 +166,7 @@ static inline void fe_add(secp256k1_fe *r, const secp256k1_fe *a, const secp256k
     /* No normalize — result may be in [P, 2^256). This is fine because:
      * - fe_mul/fe_sqr reduce any 256-bit input correctly
      * - fe_negate takes any value below 2^256
-     * - fe_half handles values up to 2P
+     * - fe_half and fe_sub take any value below 2^256
      * Only fe_is_zero, fe_cmp, fe_to_bytes need explicit normalize first. */
 #endif
 }
@@ -200,6 +200,88 @@ static inline void fe_negate(secp256k1_fe *r, const secp256k1_fe *a, int m) {
     r2 -= bb; bb &= (r2 == UINT64_MAX);
     r3 -= bb;
     r->d[0] = r0; r->d[1] = r1; r->d[2] = r2; r->d[3] = r3;
+}
+
+/* r = a - b mod p, for any a, b in [0, 2^256). LAZY: the result is in [0, 2^256), possibly >= p.
+ *
+ * One borrow chain, then the borrow out of 2^256 folded back: a wrapped difference is
+ * a - b + 2^256, which is C = 2^256 - p too much, so C comes off. That can borrow again only when
+ * a - b + 2^256 < C (b > a + p: b unreduced, a below C); the value is then 2^256 + a - b - C,
+ * and one more C makes it a - b + 2p. Branch-free. One call in place of fe_negate + fe_add. */
+static inline void fe_sub(secp256k1_fe *r, const secp256k1_fe *a, const secp256k1_fe *b) {
+#if SECP_X86_64 && (defined(__GNUC__) || defined(__clang__))
+    unsigned long long r0, r1, r2, r3;
+    unsigned char c = _subborrow_u64(0, a->d[0], b->d[0], &r0);
+    c = _subborrow_u64(c, a->d[1], b->d[1], &r1);
+    c = _subborrow_u64(c, a->d[2], b->d[2], &r2);
+    c = _subborrow_u64(c, a->d[3], b->d[3], &r3);
+    c = _subborrow_u64(0, r0, 0x1000003D1ULL & (0 - (unsigned long long)c), &r0);
+    c = _subborrow_u64(c, r1, 0, &r1);
+    c = _subborrow_u64(c, r2, 0, &r2);
+    c = _subborrow_u64(c, r3, 0, &r3);
+    r0 -= 0x1000003D1ULL & (0 - (unsigned long long)c);
+    r->d[0] = r0; r->d[1] = r1; r->d[2] = r2; r->d[3] = r3;
+#elif HAVE_INT128
+    typedef unsigned __int128 u128;
+    u128 t = (u128)a->d[0] - b->d[0];
+    uint64_t r0 = (uint64_t)t;
+    t = (u128)a->d[1] - b->d[1] - (uint64_t)(t >> 127);
+    uint64_t r1 = (uint64_t)t;
+    t = (u128)a->d[2] - b->d[2] - (uint64_t)(t >> 127);
+    uint64_t r2 = (uint64_t)t;
+    t = (u128)a->d[3] - b->d[3] - (uint64_t)(t >> 127);
+    uint64_t r3 = (uint64_t)t;
+    t = (u128)r0 - (0x1000003D1ULL & (0 - (uint64_t)(t >> 127)));
+    r0 = (uint64_t)t;
+    t = (u128)r1 - (uint64_t)(t >> 127); r1 = (uint64_t)t;
+    t = (u128)r2 - (uint64_t)(t >> 127); r2 = (uint64_t)t;
+    t = (u128)r3 - (uint64_t)(t >> 127); r3 = (uint64_t)t;
+    r0 -= 0x1000003D1ULL & (0 - (uint64_t)(t >> 127));
+    r->d[0] = r0; r->d[1] = r1; r->d[2] = r2; r->d[3] = r3;
+#else
+    secp256k1_fe nb;
+    fe_negate(&nb, b, 1);
+    fe_add(r, a, &nb);
+#endif
+}
+
+/* r = a / 2 mod p, for any a in [0, 2^256): (a + p) / 2 when a is odd, a / 2 when even. The sum
+ * is below 2^257, so the result is below 2^256. Branch-free. */
+static inline void fe_half(secp256k1_fe *r, const secp256k1_fe *a) {
+    const uint64_t mask = 0 - (a->d[0] & 1);
+#if SECP_X86_64 && (defined(__GNUC__) || defined(__clang__))
+    unsigned long long s0, s1, s2, s3;
+    unsigned char c = _addcarry_u64(0, a->d[0], 0xFFFFFFFEFFFFFC2FULL & mask, &s0);
+    c = _addcarry_u64(c, a->d[1], mask, &s1);
+    c = _addcarry_u64(c, a->d[2], mask, &s2);
+    c = _addcarry_u64(c, a->d[3], mask, &s3);
+    const uint64_t top = c;
+#elif HAVE_INT128
+    typedef unsigned __int128 u128;
+    u128 t = (u128)a->d[0] + (0xFFFFFFFEFFFFFC2FULL & mask);
+    uint64_t s0 = (uint64_t)t;
+    t = (t >> 64) + a->d[1] + mask;
+    uint64_t s1 = (uint64_t)t;
+    t = (t >> 64) + a->d[2] + mask;
+    uint64_t s2 = (uint64_t)t;
+    t = (t >> 64) + a->d[3] + mask;
+    uint64_t s3 = (uint64_t)t;
+    const uint64_t top = (uint64_t)(t >> 64);
+#else
+    uint64_t s0 = a->d[0] + (0xFFFFFFFEFFFFFC2FULL & mask);
+    uint64_t c = s0 < a->d[0];
+    uint64_t s1 = a->d[1] + c, c1 = s1 < c;
+    s1 += mask; c1 |= s1 < mask;
+    uint64_t s2 = a->d[2] + c1, c2 = s2 < c1;
+    s2 += mask; c2 |= s2 < mask;
+    uint64_t s3 = a->d[3] + c2, c3 = s3 < c2;
+    s3 += mask; c3 |= s3 < mask;
+    const uint64_t top = c3;
+#endif
+    r->d[0] = (s0 >> 1) | (s1 << 63);
+    r->d[1] = (s1 >> 1) | (s2 << 63);
+    r->d[2] = (s2 >> 1) | (s3 << 63);
+    r->d[3] = (s3 >> 1) | (top << 63);
 }
 
 /* ==================== Function declarations ==================== */
@@ -384,7 +466,6 @@ void fe_inv_var(secp256k1_fe *r, const secp256k1_fe *a);
 /* a^(p-2), constant time: the fallback without __int128, and the tests' reference. */
 void fe_inv_fermat(secp256k1_fe *r, const secp256k1_fe *a);
 int fe_sqrt(secp256k1_fe *r, const secp256k1_fe *a);
-void fe_half(secp256k1_fe *r, const secp256k1_fe *a);
 void fe_to_bytes(uint8_t *out32, const secp256k1_fe *a);
 int fe_from_bytes(secp256k1_fe *r, const uint8_t *in32);
 int fe_cmp(const secp256k1_fe *a, const secp256k1_fe *b);

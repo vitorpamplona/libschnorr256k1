@@ -493,6 +493,57 @@ static int add_matches_ref(const secp256k1_fe *a, const secp256k1_fe *b) {
     return fe_equal(&gotr, &want);
 }
 
+/* fe_sub: (a - b) mod p, and fe_half: a / 2 mod p, for every pair of representable values. */
+static int sub_matches_ref(const secp256k1_fe *a, const secp256k1_fe *b) {
+    secp256k1_fe got, nb, want, gotr;
+    fe_sub(&got, a, b);
+    fe_negate(&nb, b, 1);             /* -b mod p, checked by neg_matches_ref */
+    secp256k1_fe ar, nbr, zero = {{0, 0, 0, 0}};
+    fe_reduce_ref(&ar, a);
+    fe_reduce_ref(&nbr, &nb);
+    if (!add_matches_ref(&ar, &nbr)) return 0;
+    fe_add(&want, &ar, &nbr);
+    fe_reduce_ref(&want, &want);
+    fe_reduce_ref(&gotr, &got);
+    (void)zero;
+    return fe_equal(&gotr, &want);
+}
+
+static int half_matches_ref(const secp256k1_fe *a) {
+    secp256k1_fe h, back, ar, br;
+    fe_half(&h, a);
+    fe_add(&back, &h, &h);             /* 2 * (a / 2) == a mod p */
+    fe_reduce_ref(&ar, a);
+    fe_reduce_ref(&br, &back);
+    return fe_equal(&ar, &br);
+}
+
+static void sub_half_edge_values_match_ref(void) {
+    secp256k1_fe v[32];
+    int n = edge_values(v);
+    for (int i = 0; i < n; i++) {
+        ASSERT_TRUE(half_matches_ref(&v[i]));
+        for (int j = 0; j < n; j++) ASSERT_TRUE(sub_matches_ref(&v[i], &v[j]));
+    }
+}
+
+static void sub_half_random_values_match_ref(void) {
+    uint64_t s = 0x2545F4914F6CDD1DULL;
+    for (int n = 0; n < 200000; n++) {
+        secp256k1_fe a, b;
+        for (int k = 0; k < 4; k++) { a.d[k] = xs64(&s); b.d[k] = xs64(&s); }
+        switch (n % 5) {
+        case 0: b.d[1] = b.d[2] = b.d[3] = UINT64_MAX; a.d[1] = a.d[2] = a.d[3] = 0; a.d[0] &= 0xFFFFFFFF; break; /* b > a + p */
+        case 1: a.d[1] = a.d[2] = a.d[3] = b.d[1] = b.d[2] = b.d[3] = UINT64_MAX; break;
+        case 2: b.d[1] = b.d[2] = b.d[3] = UINT64_MAX; b.d[0] |= 0xFFFFFFFEFFFFFC2FULL; break; /* b >= p */
+        case 3: a.d[1] = a.d[2] = a.d[3] = UINT64_MAX; break;
+        default: break;
+        }
+        ASSERT_TRUE(sub_matches_ref(&a, &b));
+        ASSERT_TRUE(half_matches_ref(&a));
+    }
+}
+
 static void neg_add_edge_values_match_ref(void) {
     secp256k1_fe v[32];
     int n = edge_values(v);
@@ -537,6 +588,8 @@ void run_field_tests(void) {
     TEST(add_neg_is_zero);
     TEST(neg_add_edge_values_match_ref);
     TEST(neg_add_random_values_match_ref);
+    TEST(sub_half_edge_values_match_ref);
+    TEST(sub_half_random_values_match_ref);
     /* Multiplication */
     TEST(mul_commutative);
     TEST(sqr_matches_mul);
