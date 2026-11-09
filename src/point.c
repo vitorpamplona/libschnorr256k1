@@ -298,6 +298,21 @@ int gej_to_ge(secp256k1_ge *r, const secp256k1_gej *p) {
     return 1;
 }
 
+/* gej_to_ge with a variable-time inversion: only for points that are public (verification). */
+int gej_to_ge_var(secp256k1_ge *r, const secp256k1_gej *p) {
+    secp256k1_fe zi, zi2, zi3;
+    if (p->infinity) return 0;
+
+    fe_inv_var(&zi, &p->z);
+    fe_sqr(&zi2, &zi);
+    fe_mul(&zi3, &zi2, &zi);
+    fe_mul(&r->x, &p->x, &zi2);
+    fe_mul(&r->y, &p->y, &zi3);
+    fe_normalize_full(&r->x);
+    fe_normalize_full(&r->y);
+    return 1;
+}
+
 int gej_to_ge_x(secp256k1_fe *rx, const secp256k1_gej *p) {
     secp256k1_fe zi, zi2;
     if (p->infinity) return 0;
@@ -406,7 +421,9 @@ void batch_to_affine(secp256k1_ge *out, const secp256k1_gej *in, int count) {
     if (first_valid < 0) { free(cumz); return; } /* All infinity */
 
     secp256k1_fe inv, zi, zi2, zi3;
-    fe_inv(&inv, &cumz[count-1]);
+    /* Variable time: every caller converts a table of public points (the generator's, or the
+     * odd multiples of a public key or a public point being multiplied). */
+    fe_inv_var(&inv, &cumz[count-1]);
 
     for (int i = count - 1; i >= 1; i--) {
         if (in[i].infinity) continue; /* Skip, already set to zero */

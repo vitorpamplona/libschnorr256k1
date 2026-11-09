@@ -40,6 +40,7 @@ void gej_add(secp256k1_gej *r, const secp256k1_gej *p, const secp256k1_gej *q);
 
 /* Convert Jacobian to affine */
 int gej_to_ge(secp256k1_ge *r, const secp256k1_gej *p);
+int gej_to_ge_var(secp256k1_ge *r, const secp256k1_gej *p); /* public points only */
 
 /* x-only affine conversion (skip y) */
 int gej_to_ge_x(secp256k1_fe *rx, const secp256k1_gej *p);
