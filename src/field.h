@@ -322,7 +322,12 @@ static inline void fe_sqr(secp256k1_fe *r, const secp256k1_fe *a) {
 void fe_sqr(secp256k1_fe *r, const secp256k1_fe *a);
 #endif
 #endif
+/* Inversion (field_inv.c): safegcd, constant time in a. 0 inverts to 0. */
 void fe_inv(secp256k1_fe *r, const secp256k1_fe *a);
+/* The same, variable time and faster: only for public values. */
+void fe_inv_var(secp256k1_fe *r, const secp256k1_fe *a);
+/* a^(p-2), constant time: the fallback without __int128, and the tests' reference. */
+void fe_inv_fermat(secp256k1_fe *r, const secp256k1_fe *a);
 int fe_sqrt(secp256k1_fe *r, const secp256k1_fe *a);
 void fe_half(secp256k1_fe *r, const secp256k1_fe *a);
 void fe_to_bytes(uint8_t *out32, const secp256k1_fe *a);

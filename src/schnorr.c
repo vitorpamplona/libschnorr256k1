@@ -324,9 +324,9 @@ int secp256k1c_schnorr_verify(
     secp256k1_gej result;
     if (!schnorr_verify_core(sig64, msg, msg_len, pub32, &result)) return 0;
 
-    /* Full BIP-340: check y-parity (requires inversion) */
+    /* Full BIP-340: check y-parity (requires inversion; R is public, so variable time) */
     secp256k1_ge r_aff;
-    if (!gej_to_ge(&r_aff, &result)) return 0;
+    if (!gej_to_ge_var(&r_aff, &result)) return 0;
     return point_has_even_y(&r_aff.y);
 }
 

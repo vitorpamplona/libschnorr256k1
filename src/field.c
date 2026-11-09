@@ -312,7 +312,9 @@ static void fe_sqr_n(secp256k1_fe *r, const secp256k1_fe *a, int n) {
 
 /* ==================== Inversion (Fermat: a^(p-2)) ==================== */
 
-void fe_inv(secp256k1_fe *r, const secp256k1_fe *a) {
+/* fe_inv and fe_inv_var (field_inv.c) use safegcd; this stays as their fallback without
+ * __int128 and as the tests' reference. */
+void fe_inv_fermat(secp256k1_fe *r, const secp256k1_fe *a) {
     secp256k1_fe x2, x3, x6, x9, x11, x22, x44, x88, x176, x220, x223;
     fe_sqr(&x2, a); fe_mul(&x2, &x2, a);
     fe_sqr(&x3, &x2); fe_mul(&x3, &x3, a);

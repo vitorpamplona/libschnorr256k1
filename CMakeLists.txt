@@ -67,6 +67,7 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wno-unused-parameter")
 
 set(SECP256K1_SOURCES
     src/field.c
+    src/field_inv.c
     src/scalar.c
     src/point.c
     src/schnorr.c

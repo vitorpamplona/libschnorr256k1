@@ -264,6 +264,76 @@ static void mul_roundtrip_via_inv(void) {
     ASSERT_TRUE(fe_equal(&lazy_big, &back));
 }
 
+/* ==================== safegcd inversion against Fermat ==================== */
+
+/* fe_inv (constant time) and fe_inv_var (variable time) are libsecp256k1's safegcd; they must
+ * agree with the Fermat exponentiation, which they replaced, on every input. */
+static void inv_matches_fermat(const secp256k1_fe *a) {
+    /* Fermat gets the reduced value: fe_mul/fe_sqr reduce unreduced inputs within about 2^33
+     * of 2^256 wrongly (fe_mul(2^256-1, 2) != 2 * 0x1000003D0), so Fermat inverts those
+     * wrongly; safegcd normalizes first. Unreduced inputs are checked by inv_is_inverse. */
+    secp256k1_fe reduced = *a, want, got_ct, got_var;
+    fe_normalize(&reduced);
+    fe_inv_fermat(&want, &reduced);
+    fe_normalize_full(&want);
+    fe_inv(&got_ct, a);
+    fe_inv_var(&got_var, a);
+    ASSERT_TRUE(fe_equal(&got_ct, &want));
+    ASSERT_TRUE(fe_equal(&got_var, &want));
+}
+
+/* a * inv(a) == 1 for a non-zero a, multiplying by the reduced a. */
+static void inv_is_inverse(const secp256k1_fe *a) {
+    secp256k1_fe reduced = *a, inv, product;
+    fe_normalize(&reduced);
+    fe_inv(&inv, a);
+    fe_mul(&product, &reduced, &inv);
+    fe_normalize_full(&product);
+    ASSERT_TRUE(fe_equal(&product, &FE_ONE));
+    fe_inv_var(&inv, a);
+    fe_mul(&product, &reduced, &inv);
+    fe_normalize_full(&product);
+    ASSERT_TRUE(fe_equal(&product, &FE_ONE));
+}
+
+static void safegcd_inv_edge_cases(void) {
+    secp256k1_fe a;
+    a = FE_ZERO; inv_matches_fermat(&a);                 /* 0 inverts to 0 */
+    a = FE_ONE; inv_matches_fermat(&a);
+    fe_hex(&a, "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2e"); /* p - 1 */
+    inv_matches_fermat(&a);
+    fe_hex(&a, "0000000000000000000000000000000000000000000000000000000000000002");
+    inv_matches_fermat(&a);
+    /* Unnormalized: p + 1 and 2^256 - 1 (lazy results stay below 2^256 but may be >= p) */
+    a.d[0] = 0xFFFFFFFEFFFFFC30ULL; a.d[1] = a.d[2] = a.d[3] = UINT64_MAX;
+    inv_matches_fermat(&a);
+    inv_is_inverse(&a);
+    a.d[0] = a.d[1] = a.d[2] = a.d[3] = UINT64_MAX;
+    inv_matches_fermat(&a);
+    inv_is_inverse(&a);
+    /* Every limb boundary of the signed62 conversion: single bits at 0, 61..63, 123..125, ... */
+    static const int bits[] = {0, 61, 62, 63, 123, 124, 125, 127, 185, 186, 187, 191, 247, 248, 249, 255};
+    for (size_t i = 0; i < sizeof bits / sizeof bits[0]; i++) {
+        a = FE_ZERO;
+        a.d[bits[i] / 64] = 1ULL << (bits[i] % 64);
+        inv_matches_fermat(&a);
+    }
+}
+
+static void safegcd_inv_random(void) {
+    /* xorshift64*: deterministic, so a failure reproduces */
+    uint64_t s = 0x9E3779B97F4A7C15ULL;
+    for (int n = 0; n < 2000; n++) {
+        secp256k1_fe a;
+        for (int i = 0; i < 4; i++) {
+            s ^= s >> 12; s ^= s << 25; s ^= s >> 27;
+            a.d[i] = s * 0x2545F4914F6CDD1DULL;
+        }
+        inv_matches_fermat(&a);
+        inv_is_inverse(&a);
+    }
+}
+
 /* ==================== Runner ==================== */
 
 void run_field_tests(void) {
@@ -289,6 +359,8 @@ void run_field_tests(void) {
     TEST(inv_mul_is_one);
     TEST(inv_of_one);
     TEST(inv_of_p_minus_1);
+    TEST(safegcd_inv_edge_cases);
+    TEST(safegcd_inv_random);
     /* Half */
     TEST(half_of_even);
     TEST(half_then_double_roundtrips);
