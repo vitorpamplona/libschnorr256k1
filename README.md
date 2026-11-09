@@ -146,20 +146,24 @@ cd build
 ./bench/secp256k1_bench
 ```
 
-Sample output (x86_64):
+Sample output (x86_64, a 4-vCPU cloud VM, pinned to one core):
 
 ```
-Operation                                 µs/op
-─────────                                 ─────
-pubkeyCreate                               13.0
-signSchnorr                                26.1
-signSchnorrWithPubkey (cached pubkey)      13.3
-verifySchnorr                              35.1
-verifySchnorrFast                          31.9
-verifyBatch(4)                             46.7 per batch
-verifyBatch(16)                            82.4 per batch
-ecdhXOnly                                  26.3
+  pubkeyCreate                                  10.0 µs
+  signSchnorr                                   20.9 µs
+  signSchnorrWithPubkey (cached pubkey)         10.4 µs
+  verifySchnorr                                 27.0 µs
+  verifySchnorrFast                             25.4 µs
+  verifyBatch(4)                                59.1 µs
+  verifyBatch(16)                              183.0 µs
+  verifyBatch(200)                           2,170.3 µs
+  ecdhXOnly                                     23.7 µs
 ```
+
+This benchmark repeats one signature and one key, so branch predictors and caches
+see the same work every call, and the numbers come out lower than with varied
+inputs. The [results below](#benchmark-results-libschnorr256k1-vs-libsecp256k1-bitcoin-core)
+come from varied ones.
 
 ## Comparison Benchmark (vs libsecp256k1)
 
@@ -191,18 +195,15 @@ make schnorr256k1_bench_compare
 The benchmark cross-verifies signatures between the two libraries before
 timing, ensuring both are doing the same cryptographic work.
 
-**What the results show:**
+**What the results show** (the [tables below](#benchmark-results-libschnorr256k1-vs-libsecp256k1-bitcoin-core)):
 
-| Category | Expected result |
-|----------|----------------|
-| Individual operations (sign, verify, ECDH) | Comparable — within ~5-15% either way |
-| Batch verify (same pubkey) | libschnorr256k1 significantly faster — the per-signature cost drops with batch size |
-| Fast verify (Nostr mode) | libschnorr256k1 faster — skips y-parity inversion |
-| Cached pubkey sign | libschnorr256k1 faster — avoids re-deriving the public key |
-
-The batch verification advantage matters for Nostr relays and clients
-processing feeds from the same author: from batch size 32 up, the
-per-signature cost is about a third of an individual verification.
+- Signing and key creation take about a third less time than in libsecp256k1, and
+  signing with a known public key a third of the time.
+- Verifying real Nostr events takes about a fifth less time; with a new key every call
+  (no cache can help), verification is level with libsecp256k1.
+- ECDH and tweak-multiply are level with libsecp256k1.
+- Batch verification of one author's signatures costs, from batch size 32 up, under
+  40% of a single verification.
 
 ## Project Structure
 
@@ -245,19 +246,29 @@ MIT. See [LICENSE](LICENSE).
 
 ## Benchmark Results: libschnorr256k1 vs libsecp256k1 (Bitcoin Core)
 
-Measured on x86_64 Linux. Both libraries compiled with `-O3` and LTO.
-Signatures cross-verified between libraries before timing.
+From [libschnorr256k1-bench](https://github.com/vitorpamplona/libschnorr256k1-bench)'s
+c layer, which calls both libraries from C on the same inputs and checks every output
+against the same digests before timing: libschnorr256k1 `2f4a13d` and libsecp256k1
+`6e2c8bc`, each built with its own CMake flags (Release). Median µs per call, single
+thread, on a 4-vCPU x86_64 cloud VM (Intel Xeon @ 2.10 GHz, a shared machine), 2026-11-09.
+Every other library and language the bench covers is in its README.
 
 ### Individual Operations
 
-| Operation | libsecp256k1 (µs) | libschnorr256k1 (µs) | Speedup |
-|-----------|-------------------:|----------------------:|--------:|
-| pubkeyCreate | 20.3 | 16.2 | 1.25x |
-| signSchnorr (full) | 40.4 | 32.0 | 1.26x |
-| signSchnorr (cached pubkey) | 21.4 | 16.4 | 1.30x |
-| verifySchnorr (BIP-340) | 39.1 | 39.2 | 1.00x |
-| verifySchnorrFast (Nostr) | — | 34.2 | — |
-| ECDH (x-only) | 40.6 | 33.2 | 1.22x |
+| Operation | libschnorr256k1 (µs) | libsecp256k1 (µs) |
+|-----------|---------------------:|------------------:|
+| pubkeyCreate (65 bytes) | 10.6 | 15.4 |
+| signSchnorr | 21.5 | 33.1 |
+| signSchnorr, public key known | 10.9 | 34.5 |
+| verifySchnorr, a new key each call | 36.1 | 36.8 |
+| verifySchnorr, one key | 26.1 | 36.2 |
+| verifySchnorrFast, one key | 24.8 | 33.8 (full verify) |
+| ECDH (x-only) | 32.3 | 32.4 |
+| tweak-mul (public key) | 32.2 | 31.6 |
+| pubkey compress | 0.06 | 0.13 |
+
+libsecp256k1 has no call that signs with a known public key, so its row is its plain
+sign; and no fast verify, so its row is its full verify.
 
 ### Batch Verification (same pubkey)
 
@@ -266,26 +277,31 @@ libsecp256k1 has no same-pubkey batch API: it verifies N signatures with N
 128-bit weight per signature derived from all of the inputs, so invalid signatures
 cannot cancel each other out. Per signature, each batch of different signatures by
 one key, on a 4-vCPU x86_64 cloud VM (a shared machine), where a single verification
-of the same signatures takes 36 µs:
+of the same signatures takes 28.4 µs (median of 15 rounds over 6,400 signatures,
+pinned to one core, the same VM as above):
 
 | Batch size | libschnorr256k1 (µs/sig) |
 |-----------:|--------------------------:|
-| 2 | 23.9 |
-| 4 | 17.6 |
-| 8 | 14.7 |
-| 16 | 13.1 |
-| 32 | 12.3 |
-| 64 | 12.3 |
-| 200 | 12.3 |
+| 2 | 20.3 |
+| 4 | 15.9 |
+| 8 | 13.0 |
+| 16 | 11.7 |
+| 32 | 10.9 |
+| 64 | 10.7 |
+| 200 | 10.7 |
 
 Each signature after the first costs a square root (to lift its R), a table of its
 odd multiples and about 25 point additions; the doublings, the G and P terms and one
 inversion per 64 signatures are shared by the batch.
 
-### Nostr-Specific Advantages
+### Real Nostr Events
 
-| Advantage | libsecp256k1 (µs) | libschnorr256k1 (µs) | Speedup |
-|-----------|-------------------:|----------------------:|--------:|
-| Fast verify (skip y-parity) | 39.1 | 34.2 | 1.14x |
-| Cached pubkey sign | 40.6 | 16.5 | 2.46x |
-| Warm liftX (repeated pubkey) | 39.1 | 39.0 | 1.00x |
+The bench's dataset: 29,614 signed events from relays, by 4,926 authors, in the order
+relays sent them (a few prolific authors and thousands seen once).
+
+| Operation | libschnorr256k1 (µs) | libsecp256k1 (µs) |
+|-----------|---------------------:|------------------:|
+| verify each event | 31.1 | 38.2 |
+| fast verify each event | 30.6 | 38.8 (full verify) |
+| batch verify, pages of 200 batched by author (per event) | 18.9 | – |
+| ECDH with each author's key | 33.0 | 33.6 |
