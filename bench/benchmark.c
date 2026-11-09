@@ -137,12 +137,11 @@ static void bench_sign(int iters) {
     record_result("signSchnorr", now_ms() - start, iters);
 }
 
-static void bench_sign_xonly(int iters) {
-    /* Pre-compute x-only pubkey */
-    uint8_t pub65[65];
+static void bench_sign_with_pubkey(int iters) {
+    /* Pre-compute the compressed pubkey: its prefix carries the y parity signing needs */
+    uint8_t pub65[65], pub33[33];
     secp256k1c_pubkey_create(pub65, TEST_PRIVKEY);
-    uint8_t xonly[32];
-    memcpy(xonly, pub65 + 1, 32);
+    secp256k1c_pubkey_compress(pub33, pub65);
 
     uint8_t msg[32] = {0};
     uint8_t sig[64];
@@ -150,9 +149,9 @@ static void bench_sign_xonly(int iters) {
 
     double start = now_ms();
     for (int i = 0; i < iters; i++) {
-        secp256k1c_schnorr_sign_xonly(sig, msg, 32, TEST_PRIVKEY, xonly, TEST_AUXRAND);
+        secp256k1c_schnorr_sign_with_pubkey(sig, msg, 32, TEST_PRIVKEY, pub33, TEST_AUXRAND);
     }
-    record_result("signSchnorrXOnly (cached pubkey)", now_ms() - start, iters);
+    record_result("signSchnorrWithPubkey (cached pubkey)", now_ms() - start, iters);
 }
 
 static void bench_verify(int iters) {
@@ -300,7 +299,7 @@ int main(void) {
     bench_seckey_verify(N * 100);
     bench_pubkey_create(N);
     bench_sign(N);
-    bench_sign_xonly(N);
+    bench_sign_with_pubkey(N);
     bench_verify(N);
     bench_verify_fast(N);
     bench_verify_batch(4, N / 2);

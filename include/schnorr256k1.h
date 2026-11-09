@@ -72,14 +72,28 @@ int secp256k1c_schnorr_sign(
     const uint8_t *auxrand32
 );
 
-/* Sign with a pre-computed x-only pubkey (fast path, avoids re-deriving pubkey).
- * Returns 1 on success, 0 on failure. */
+/* Sign with seckey32's 32-byte x-only pubkey. An x-only key does not carry the y parity BIP-340
+ * signing needs, so this derives the public key: no faster than secp256k1c_schnorr_sign. Use
+ * secp256k1c_schnorr_sign_with_pubkey with the compressed key for the fast path.
+ * Returns 0 if xonly_pub32 is not seckey32's public key. */
 int secp256k1c_schnorr_sign_xonly(
     uint8_t *sig64,
     const uint8_t *msg,
     size_t msg_len,
     const uint8_t *seckey32,
     const uint8_t *xonly_pub32,
+    const uint8_t *auxrand32
+);
+
+/* Sign with seckey32's 33-byte compressed pubkey (02/03 || x) already known: skips deriving it,
+ * about half the work of secp256k1c_schnorr_sign. The caller must pass seckey32's own public
+ * key; a wrong one gives an invalid signature. Returns 0 if pub33 does not start with 02 or 03. */
+int secp256k1c_schnorr_sign_with_pubkey(
+    uint8_t *sig64,
+    const uint8_t *msg,
+    size_t msg_len,
+    const uint8_t *seckey32,
+    const uint8_t *pub33,
     const uint8_t *auxrand32
 );
 

@@ -52,7 +52,8 @@ All public functions are declared in [`include/schnorr256k1.h`](include/schnorr2
 |----------|-------------|
 | `secp256k1c_init()` | Initialize precomputed tables (call once, thread-safe) |
 | `secp256k1c_schnorr_sign()` | BIP-340 Schnorr sign (any message length) |
-| `secp256k1c_schnorr_sign_xonly()` | Sign with cached x-only pubkey (fast path) |
+| `secp256k1c_schnorr_sign_with_pubkey()` | Sign with the cached 33-byte compressed pubkey (fast path: skips deriving it) |
+| `secp256k1c_schnorr_sign_xonly()` | Sign with the x-only pubkey: derives the public key for its y parity, so no faster than `sign`; returns 0 if the key is not the secret's |
 | `secp256k1c_schnorr_verify()` | Full BIP-340 verification |
 | `secp256k1c_schnorr_verify_fast()` | Fast verify (skip y-parity, safe for Nostr) |
 | `secp256k1c_schnorr_verify_batch()` | Batch verify N sigs from the same pubkey |
@@ -152,7 +153,7 @@ Operation                                 µs/op
 ─────────                                 ─────
 pubkeyCreate                               13.0
 signSchnorr                                26.1
-signSchnorrXOnly (cached pubkey)           13.3
+signSchnorrWithPubkey (cached pubkey)      13.3
 verifySchnorr                              35.1
 verifySchnorrFast                          31.9
 verifyBatch(4)                             46.7 per batch
