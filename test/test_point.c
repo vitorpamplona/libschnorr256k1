@@ -4,6 +4,7 @@
  */
 #include "test_framework.h"
 #include "point.h"
+#include "schnorr256k1.h"
 
 /* Helper: compare affine x coordinates */
 static int affine_x_eq(const secp256k1_gej *a, const secp256k1_gej *b) {
@@ -203,6 +204,46 @@ static void mul_double_g_separate_vs_combined(void) {
     ASSERT_TRUE(affine_xy_eq(&combined, &sep));
 }
 
+/* ECDH multiplies (g*x, g^2) on an isomorphic curve (g = x^3 + 7). For an x where g*x is also a
+ * secp256k1 point's x, that point's cached tables must not come from ECDH's point: ECDH goes
+ * through ecmult_uncached. With ecmult there, the cached and uncached results below differ. */
+static void ecdh_leaves_the_table_cache_alone(void) {
+    static const secp256k1_fe SEVEN = {{7, 0, 0, 0}};
+    int found = 0;
+    for (int i = 0; i < 4096 && found < 4; i++) {
+        uint8_t xb[32], label[8] = {'i', 's', 'o', 'c', 'a', 'c', (uint8_t)(i >> 8), (uint8_t)i};
+        secp256k1c_sha256(xb, label, sizeof label);
+        secp256k1_fe x, y, g, x2, y2;
+        fe_from_bytes(&x, xb);
+        if (fe_cmp(&x, &FE_P) >= 0 || !point_lift_x(&x, &y, &x)) continue;
+        fe_sqr(&g, &x);
+        fe_mul(&g, &g, &x);
+        fe_add(&g, &g, &SEVEN);
+        fe_mul(&x2, &g, &x);
+        fe_normalize_full(&x2);
+        if (!point_lift_x(&x2, &y2, &x2)) continue; /* g*x is no secp256k1 point's x */
+        found++;
+
+        uint8_t k[32], out[32];
+        secp256k1c_sha256(k, xb, 32);
+        ASSERT_TRUE(secp256k1c_ecdh_xonly(out, xb, k)); /* a new key: the isomorphic path */
+
+        secp256k1_scalar t;
+        uint8_t tb[32];
+        secp256k1c_sha256(tb, k, 32);
+        scalar_from_bytes(&t, tb);
+        const secp256k1_ge real = {.x = x2, .y = y2};
+        secp256k1_gej a, b;
+        secp256k1_fe ax, bx;
+        ecmult(&a, &real, &t);
+        ecmult_uncached(&b, &real, &t);
+        ASSERT_TRUE(gej_to_ge_x(&ax, &a));
+        ASSERT_TRUE(gej_to_ge_x(&bx, &b));
+        ASSERT_TRUE(fe_equal(&ax, &bx));
+    }
+    ASSERT_EQ_INT(found, 4);
+}
+
 /* ==================== Runner ==================== */
 
 void run_point_tests(void) {
@@ -228,5 +269,7 @@ void run_point_tests(void) {
     TEST(mul_g_matches_mul);
     /* Dual scalar */
     TEST(mul_double_g_separate_vs_combined);
+    /* ECDH's isomorphic-curve point stays out of the table cache */
+    TEST(ecdh_leaves_the_table_cache_alone);
     printf("  Point: done\n");
 }

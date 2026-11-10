@@ -62,18 +62,41 @@ static int cache_slot(const uint8_t *pub32) {
     return ((int)pub32[0] | ((int)pub32[1] << 8)) & PUBKEY_CACHE_MASK;
 }
 
-static int lift_x_cached(secp256k1_fe *out_x, secp256k1_fe *out_y, const uint8_t *pub32) {
+/* The cached lift of pub32, if there is one; computes nothing. */
+static int lift_x_cache_get(secp256k1_fe *out_x, secp256k1_fe *out_y, const uint8_t *pub32) {
     cached_pubkey *c = &pubkey_cache[cache_slot(pub32)];
-
+    int hit = 0;
     if (slot_lock_acquire(&c->lock)) {
-        int hit = c->valid && memcmp(c->key_bytes, pub32, 32) == 0;
+        hit = c->valid && memcmp(c->key_bytes, pub32, 32) == 0;
         if (hit) {
             *out_x = c->px;
             *out_y = c->py;
         }
         slot_lock_release(&c->lock);
-        if (hit) return 1;
     }
+    return hit;
+}
+
+/* Keys ECDH has met without their lift cached, one fingerprint per lift-cache slot (bytes 2..9
+ * of x; the slot is bytes 0..1). A key's first ECDH skips the square root; its second lifts it,
+ * which caches it, so a repeat peer costs what it did before. A stale or colliding fingerprint
+ * only chooses the other path; both give the same result. */
+static uint64_t ecdh_seen[PUBKEY_CACHE_SIZE];
+
+/* True if pub32 was met before, by its fingerprint; records it either way. */
+static int ecdh_seen_before(const uint8_t *pub32) {
+    uint64_t fp;
+    memcpy(&fp, pub32 + 2, 8);
+    uint64_t *slot = &ecdh_seen[cache_slot(pub32)];
+    if (__atomic_load_n(slot, __ATOMIC_RELAXED) == fp) return 1;
+    __atomic_store_n(slot, fp, __ATOMIC_RELAXED);
+    return 0;
+}
+
+static int lift_x_cached(secp256k1_fe *out_x, secp256k1_fe *out_y, const uint8_t *pub32) {
+    cached_pubkey *c = &pubkey_cache[cache_slot(pub32)];
+
+    if (lift_x_cache_get(out_x, out_y, pub32)) return 1;
 
     secp256k1_fe x;
     fe_from_bytes(&x, pub32);
@@ -645,20 +668,47 @@ int secp256k1c_pubkey_tweak_mul(uint8_t *result, size_t result_len,
 }
 
 int secp256k1c_ecdh_xonly(uint8_t *result32, const uint8_t *xonly_pub32, const uint8_t *scalar32) {
-    /* Use cached liftX — same peer key in NIP-44 conversations */
-    secp256k1_fe px, py;
-    if (!lift_x_cached(&px, &py, xonly_pub32)) return 0;
-
     secp256k1_scalar k;
     scalar_from_bytes(&k, scalar32);
     if (!scalar_is_valid(&k)) return 0;
 
+    secp256k1_fe px, py, rx;
     secp256k1_gej rj;
-    const secp256k1_ge p = {.x = px, .y = py};
-    ecmult(&rj, &p, &k);
-
-    secp256k1_fe rx;
-    if (!gej_to_ge_x(&rx, &rj)) return 0;
+    if (lift_x_cache_get(&px, &py, xonly_pub32) ||
+        (ecdh_seen_before(xonly_pub32) && lift_x_cached(&px, &py, xonly_pub32))) {
+        /* A key met before (the same peer in a NIP-44 conversation, or one verified): its lift
+         * and its tables are, or now get, cached. */
+        const secp256k1_ge p = {.x = px, .y = py};
+        ecmult(&rj, &p, &k);
+        if (!gej_to_ge_x(&rx, &rj)) return 0;
+    } else {
+        /* A new key: no square root (libsecp256k1's ecmult_const_xonly, after Peter Dettman). With
+         * g = x^3 + 7, the point (g*x, g^2) is on y^2 = x^3 + 7*g^3, which is secp256k1 scaled by
+         * u = sqrt(g) (x' = u^2*x, y' = u^3*y) when g is a square, that is, when x is on the
+         * curve. The formulas never use b, so the multiply runs on that curve as is, uncached
+         * (its x is not a secp256k1 point's), and the result's x is x'/g. */
+        static const secp256k1_fe SEVEN = {{7, 0, 0, 0}};
+        secp256k1_fe x, g, t;
+        secp256k1_ge q;
+        fe_from_bytes(&x, xonly_pub32);
+        if (fe_cmp(&x, &FE_P) >= 0) return 0;
+        fe_sqr(&g, &x);
+        fe_mul(&g, &g, &x);
+        fe_add(&g, &g, &SEVEN);
+        if (!fe_is_square_var(&g)) return 0;
+        fe_mul(&q.x, &g, &x);
+        fe_sqr(&q.y, &g);
+        fe_normalize_full(&q.x);
+        fe_normalize_full(&q.y);
+        ecmult_uncached(&rj, &q, &k);
+        if (rj.infinity) return 0;
+        /* x = X / (Z^2 * g): one inversion, constant time as gej_to_ge_x's (Z depends on k) */
+        fe_sqr(&t, &rj.z);
+        fe_mul(&t, &t, &g);
+        fe_inv(&t, &t);
+        fe_mul(&rx, &rj.x, &t);
+        fe_normalize_full(&rx);
+    }
     fe_to_bytes(result32, &rx);
     return 1;
 }
