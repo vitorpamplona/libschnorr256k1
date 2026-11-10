@@ -7,8 +7,10 @@
  *               (public keys and signatures being made, ECDH, tweaks).
  *   fe_inv_var  variable time, faster: only for public values (verification, and tables of
  *               points that are public).
+ *   fe_is_square_var  whether a public value is a square, by its Jacobi symbol (modinv64's
+ *               secp256k1_jacobi64_maybe_var), as libsecp256k1's secp256k1_fe_is_square_var.
  *
- * Without __int128 both fall back to the Fermat exponentiation (field.c, fe_inv_fermat).
+ * Without __int128 all fall back to exponentiation (field.c: fe_inv_fermat, fe_sqrt).
  */
 #include "field.h"
 
@@ -16,7 +18,7 @@
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
-/* modinv64.h also declares the Jacobi symbol helper, which nothing here uses. */
+/* modinv64_impl.h defines helpers this file does not use. */
 #pragma GCC diagnostic ignored "-Wunused-function"
 #endif
 #include "safegcd/int128_native_impl.h"
@@ -72,10 +74,27 @@ void fe_inv_var(secp256k1_fe *r, const secp256k1_fe *a) {
     fe_from_signed62(r, &s);
 }
 
+int fe_is_square_var(const secp256k1_fe *a) {
+    secp256k1_fe t = *a, root;
+    secp256k1_modinv64_signed62 s;
+    int j;
+    fe_normalize(&t);
+    if ((t.d[0] | t.d[1] | t.d[2] | t.d[3]) == 0) return 1; /* 0 = 0^2; Jacobi needs gcd(t, p) = 1 */
+    fe_to_signed62(&s, &t);
+    j = secp256k1_jacobi64_maybe_var(&s, &FE_MODINFO);
+    if (j != 0) return j > 0;
+    return fe_sqrt(&root, &t); /* 25 rounds did not settle it: extremely rare */
+}
+
 #else /* !HAVE_INT128 */
 
 void fe_inv(secp256k1_fe *r, const secp256k1_fe *a) { fe_inv_fermat(r, a); }
 
 void fe_inv_var(secp256k1_fe *r, const secp256k1_fe *a) { fe_inv_fermat(r, a); }
+
+int fe_is_square_var(const secp256k1_fe *a) {
+    secp256k1_fe root;
+    return fe_sqrt(&root, a);
+}
 
 #endif /* HAVE_INT128 */

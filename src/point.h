@@ -54,6 +54,11 @@ void ecmult_gen(secp256k1_gej *r, const secp256k1_scalar *scalar);
  * cached by x and y parity, shared with ecmult_double_g). Variable time. */
 void ecmult(secp256k1_gej *r, const secp256k1_ge *p, const secp256k1_scalar *scalar);
 
+/* The same without the cache: for a point that must not enter it, such as ECDH's point on an
+ * isomorphic curve, whose x may be another point's x on secp256k1 (the cache would then hand that
+ * point the wrong tables). */
+void ecmult_uncached(secp256k1_gej *r, const secp256k1_ge *p, const secp256k1_scalar *scalar);
+
 /* Dual scalar multiplication (Strauss + GLV): out = s*G + e*P */
 void ecmult_double_g(secp256k1_gej *r, const secp256k1_scalar *s,
                      const secp256k1_ge *p, const secp256k1_scalar *e);

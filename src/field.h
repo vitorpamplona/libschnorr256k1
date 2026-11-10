@@ -466,6 +466,8 @@ void fe_inv_var(secp256k1_fe *r, const secp256k1_fe *a);
 /* a^(p-2), constant time: the fallback without __int128, and the tests' reference. */
 void fe_inv_fermat(secp256k1_fe *r, const secp256k1_fe *a);
 int fe_sqrt(secp256k1_fe *r, const secp256k1_fe *a);
+/* Whether a is a square (0 is), variable time, about an inversion's cost: only for public values. */
+int fe_is_square_var(const secp256k1_fe *a);
 void fe_to_bytes(uint8_t *out32, const secp256k1_fe *a);
 int fe_from_bytes(secp256k1_fe *r, const uint8_t *in32);
 int fe_cmp(const secp256k1_fe *a, const secp256k1_fe *b);

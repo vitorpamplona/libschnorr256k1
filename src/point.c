@@ -92,6 +92,18 @@ static int p_cache_slot(const secp256k1_fe *px) {
 /* The wNAF-5 tables of affine P (on the curve) and lambda(P), copied from the cache or built
  * (and offered to it), into out. *flip is 1 when they are the tables of -P: the caller negates
  * each point it takes from them. */
+static void p_tables_build(p_table_set *out, const secp256k1_ge *p) {
+    /* P, 3P, ..., 15P with mixed additions and one inversion (ecmult_odd_multiples_affine), and
+     * lambda(kP) = (beta*x, y) from them: no second table, no second inversion. */
+    secp256k1_gej scratch[P_TABLE_ENTRIES];
+    ecmult_odd_multiples_affine(out->p_odd, p, 1, P_TABLE_ENTRIES, scratch);
+    for (int i = 0; i < P_TABLE_ENTRIES; i++) {
+        fe_mul(&out->p_lam_odd[i].x, &out->p_odd[i].x, &GLV_BETA);
+        fe_normalize_full(&out->p_lam_odd[i].x);
+        out->p_lam_odd[i].y = out->p_odd[i].y;
+    }
+}
+
 static void p_tables(p_table_set *out, const secp256k1_ge *p, int *flip) {
     cached_p_table *cached = &p_table_cache[p_cache_slot(&p->x)];
     const int y_odd = fe_is_odd(&p->y);
@@ -107,15 +119,7 @@ static void p_tables(p_table_set *out, const secp256k1_ge *p, int *flip) {
         if (hit) return;
     }
 
-    /* P, 3P, ..., 15P with mixed additions and one inversion (ecmult_odd_multiples_affine), and
-     * lambda(kP) = (beta*x, y) from them: no second table, no second inversion. */
-    secp256k1_gej scratch[P_TABLE_ENTRIES];
-    ecmult_odd_multiples_affine(out->p_odd, p, 1, P_TABLE_ENTRIES, scratch);
-    for (int i = 0; i < P_TABLE_ENTRIES; i++) {
-        fe_mul(&out->p_lam_odd[i].x, &out->p_odd[i].x, &GLV_BETA);
-        fe_normalize_full(&out->p_lam_odd[i].x);
-        out->p_lam_odd[i].y = out->p_odd[i].y;
-    }
+    p_tables_build(out, p);
     *flip = 0;
 
     if (slot_lock_acquire(&cached->lock)) {
@@ -632,7 +636,8 @@ void ecmult_gen(secp256k1_gej *r, const secp256k1_scalar *scalar) {
 }
 
 /* Arbitrary point multiplication using GLV + wNAF-5 */
-void ecmult(secp256k1_gej *r, const secp256k1_ge *p, const secp256k1_scalar *scalar) {
+static void ecmult_impl(secp256k1_gej *r, const secp256k1_ge *p, const secp256k1_scalar *scalar,
+                        int cached) {
     if (scalar_is_zero(scalar)) {
         gej_set_infinity(r);
         return;
@@ -651,11 +656,12 @@ void ecmult(secp256k1_gej *r, const secp256k1_ge *p, const secp256k1_scalar *sca
     int len1 = wnaf_encode(wnaf1, 145, &split.k1, w);
     int len2 = wnaf_encode(wnaf2, 145, &split.k2, w);
 
-    /* P-side tables: from the cache shared with ecmult_double_g.
-     * For ECDH, the same peer key is used repeatedly (NIP-44 conversations). */
-    int flip;
+    /* P-side tables: from the cache shared with ecmult_double_g (for ECDH, the same peer key is
+     * used repeatedly in NIP-44 conversations), or built here for ecmult_uncached. */
+    int flip = 0;
     p_table_set tables;
-    p_tables(&tables, p, &flip);
+    if (cached) p_tables(&tables, p, &flip);
+    else p_tables_build(&tables, p);
     const secp256k1_ge *p_odd = tables.p_odd;
     const secp256k1_ge *p_lam_odd = tables.p_lam_odd;
     split.neg_k1 ^= flip;
@@ -694,6 +700,14 @@ void ecmult(secp256k1_gej *r, const secp256k1_ge *p, const secp256k1_scalar *sca
             gej_add_ge(r, r, &pt);
         }
     }
+}
+
+void ecmult(secp256k1_gej *r, const secp256k1_ge *p, const secp256k1_scalar *scalar) {
+    ecmult_impl(r, p, scalar, 1);
+}
+
+void ecmult_uncached(secp256k1_gej *r, const secp256k1_ge *p, const secp256k1_scalar *scalar) {
+    ecmult_impl(r, p, scalar, 0);
 }
 
 /* Dual scalar multiplication: r = s*G + e*P (Strauss + GLV) */

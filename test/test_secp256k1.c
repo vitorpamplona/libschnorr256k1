@@ -148,6 +148,71 @@ static void ecdh_xonly_symmetric(void) {
     ASSERT_MEM_EQ(resultAB, resultBA, 32);
 }
 
+/* Bytes of SHA-256("ecdh-test" || tag || i), for keys no other test touches. */
+static void ecdh_test_bytes(uint8_t out[32], uint8_t tag, int i) {
+    uint8_t in[12] = {'e', 'c', 'd', 'h', '-', 't', 'e', 's', 't', tag, (uint8_t)(i >> 8), (uint8_t)i};
+    secp256k1c_sha256(out, in, sizeof in);
+}
+
+/* A new key's ECDH runs on an isomorphic curve and never lifts x: it must still be x(k*P) for
+ * either lift, which tweak-mul of 02 || x computes the usual way. ECDH first, so its key is new. */
+static void ecdh_xonly_matches_tweak_mul(void) {
+    int odd = 0;
+    for (int i = 0; i < 64; i++) {
+        uint8_t sec[32], k[32], pub65[65], pub33[33], even[33], tw[33], out[32];
+        ecdh_test_bytes(sec, 1, i);
+        ecdh_test_bytes(k, 2, i);
+        ASSERT_TRUE(secp256k1c_pubkey_create(pub65, sec));
+        ASSERT_TRUE(secp256k1c_pubkey_compress(pub33, pub65));
+        if (pub33[0] == 0x03) odd++;
+        ASSERT_TRUE(secp256k1c_ecdh_xonly(out, pub33 + 1, k));
+        even[0] = 0x02;
+        memcpy(even + 1, pub33 + 1, 32);
+        ASSERT_TRUE(secp256k1c_pubkey_tweak_mul(tw, 33, even, 33, k));
+        ASSERT_MEM_EQ(out, tw + 1, 32);
+    }
+    ASSERT_TRUE(odd > 10 && odd < 54); /* keys of both parities */
+}
+
+/* A key seen before (verified: its lift is cached) takes the cached path: the same result. */
+static void ecdh_xonly_cached_and_new_agree(void) {
+    for (int i = 0; i < 16; i++) {
+        uint8_t sec[32], k[32], pub65[65], msg[32], sig[64], fresh[32], cached[32];
+        ecdh_test_bytes(sec, 3, i);
+        ecdh_test_bytes(k, 4, i);
+        ecdh_test_bytes(msg, 5, i);
+        ASSERT_TRUE(secp256k1c_pubkey_create(pub65, sec));
+        ASSERT_TRUE(secp256k1c_ecdh_xonly(fresh, pub65 + 1, k));
+        ASSERT_TRUE(secp256k1c_schnorr_sign(sig, msg, 32, sec, NULL));
+        ASSERT_TRUE(secp256k1c_schnorr_verify(sig, msg, 32, pub65 + 1)); /* caches the lift */
+        ASSERT_TRUE(secp256k1c_ecdh_xonly(cached, pub65 + 1, k));
+        ASSERT_MEM_EQ(fresh, cached, 32);
+    }
+}
+
+/* An x with no point fails, as tweak-mul of 02 || x does; so do x = p and BIP-340 vector 5's key. */
+static void ecdh_xonly_rejects_x_off_the_curve(void) {
+    int rejected = 0;
+    for (int i = 0; i < 64; i++) {
+        uint8_t x[32], k[32], even[33], tw[33], out[32];
+        ecdh_test_bytes(x, 6, i);
+        ecdh_test_bytes(k, 7, i);
+        even[0] = 0x02;
+        memcpy(even + 1, x, 32);
+        int on_curve = secp256k1c_pubkey_tweak_mul(tw, 33, even, 33, k);
+        ASSERT_EQ_INT(on_curve, secp256k1c_ecdh_xonly(out, x, k));
+        if (on_curve) ASSERT_MEM_EQ(out, tw + 1, 32);
+        else rejected++;
+    }
+    ASSERT_TRUE(rejected > 10 && rejected < 54);
+    HEX32(k, "67E56582298859DDAE725F972992A07C6C4FB9F62A8FFF58CE3CA926A1063530");
+    HEX32(p, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
+    HEX32(v5, "EEFDEA4CDB677750A420FEE807EACF21EB9898AE79B9768766E4FAA04A2D4A34");
+    uint8_t out[32];
+    ASSERT_FALSE(secp256k1c_ecdh_xonly(out, p, k));
+    ASSERT_FALSE(secp256k1c_ecdh_xonly(out, v5, k));
+}
+
 /* ==================== Schnorr Edge Cases ==================== */
 
 static void verify_wrong_message(void) {
@@ -535,6 +600,9 @@ void run_secp256k1_tests(void) {
     /* ECDH */
     TEST(ecdh_symmetry);
     TEST(ecdh_xonly_symmetric);
+    TEST(ecdh_xonly_matches_tweak_mul);
+    TEST(ecdh_xonly_cached_and_new_agree);
+    TEST(ecdh_xonly_rejects_x_off_the_curve);
     /* Schnorr edge cases */
     TEST(verify_wrong_message);
     TEST(verify_corrupted_sig);
