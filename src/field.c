@@ -370,13 +370,26 @@ void fe_to_bytes(uint8_t *out32, const secp256k1_fe *a) {
     }
 }
 
+/* A big-endian 64-bit load: one load and a byte swap where the compiler has the builtin (GCC
+ * does not merge the byte loop into one: it emits eight byte loads with shifts per limb). */
+static inline uint64_t load_be64(const uint8_t *p) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    uint64_t v;
+    memcpy(&v, p, 8);
+    return __builtin_bswap64(v);
+#elif defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    uint64_t v;
+    memcpy(&v, p, 8);
+    return v;
+#else
+    uint64_t v = 0;
+    for (int j = 0; j < 8; j++) v = (v << 8) | p[j];
+    return v;
+#endif
+}
+
 int fe_from_bytes(secp256k1_fe *r, const uint8_t *in32) {
-    for (int i = 0; i < 4; i++) {
-        uint64_t v = 0;
-        for (int j = 0; j < 8; j++)
-            v = (v << 8) | in32[i * 8 + j];
-        r->d[3 - i] = v;
-    }
+    for (int i = 0; i < 4; i++) r->d[3 - i] = load_be64(in32 + 8 * i);
     return 1;
 }
 
